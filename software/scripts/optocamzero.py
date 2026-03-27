@@ -844,6 +844,7 @@ def button_handler():
                 )
                 if any_pressed:
                     splash_active = False
+                    _idle_last_activity = time.time()
                     joy_press_times.clear()
                     print("Splash closed")
                 time.sleep(0.05)
@@ -1269,6 +1270,7 @@ def main():
                         picam2.configure(config_cache.preview_config)
                         picam2.start()
                         camera_started = True
+                        _idle_last_activity = time.time()
                         print("✓ Preview started\n")
 
                 if capture_requested:
