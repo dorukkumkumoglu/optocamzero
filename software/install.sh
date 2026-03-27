@@ -134,6 +134,9 @@ systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
 systemctl disable avahi-daemon 2>/dev/null || true
 systemctl disable e2scrub_reap 2>/dev/null || true
 systemctl disable dphys-swapfile 2>/dev/null || true
+systemctl disable bluetooth 2>/dev/null || true
+systemctl disable hciuart 2>/dev/null || true
+systemctl disable triggerhappy 2>/dev/null || true
 
 # ── 8. Done ───────────────────────────────────────────────────────────────────
 echo ""
