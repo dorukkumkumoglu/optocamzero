@@ -85,15 +85,20 @@ EOF
 echo -e "${YELLOW}[6/8] Configuring /boot/firmware/config.txt...${NC}"
 CONFIG=/boot/firmware/config.txt
 
+# Fix conflicting default settings
+sed -i 's/^camera_auto_detect=1/camera_auto_detect=0/' "$CONFIG"
+sed -i 's/^display_auto_detect=1/display_auto_detect=0/' "$CONFIG"
+sed -i 's/^dtparam=audio=on/dtparam=audio=off/' "$CONFIG"
+
 # Helper: append line only if not already present
 add_if_missing() {
     grep -qxF "$1" "$CONFIG" || echo "$1" >> "$CONFIG"
 }
 
 add_if_missing "dtparam=spi=on"
-add_if_missing "camera_auto_detect=0"
-add_if_missing "display_auto_detect=0"
+add_if_missing "dtparam=i2c_arm=off"
 add_if_missing "dtoverlay=imx708"
+add_if_missing "dtoverlay=st7789,cs=1,dc=9,rst=25,bl=13,width=240,height=240"
 add_if_missing "arm_boost=1"
 add_if_missing "arm_freq=1200"
 add_if_missing "over_voltage=2"
@@ -102,14 +107,16 @@ add_if_missing "boot_delay=0"
 add_if_missing "disable_splash=1"
 add_if_missing "dtoverlay=disable-bt"
 add_if_missing "dtoverlay=spi1-3cs"
-add_if_missing "dtoverlay=vc4-kms-v3d"
-add_if_missing "max_framebuffers=2"
 add_if_missing "disable_fw_kms_setup=1"
 add_if_missing "disable_overscan=1"
 
-# SPI buffer size for faster display updates
-if ! grep -q "spidev.bufsiz" /boot/firmware/cmdline.txt 2>/dev/null; then
-    sed -i 's/$/ spidev.bufsiz=65536/' /boot/firmware/cmdline.txt
+# Boot parameters
+CMDLINE=/boot/firmware/cmdline.txt
+if ! grep -q "spidev.bufsiz" "$CMDLINE"; then
+    sed -i 's/$/ spidev.bufsiz=65536/' "$CMDLINE"
+fi
+if ! grep -q "quiet" "$CMDLINE"; then
+    sed -i 's/$/ quiet loglevel=3 logo.nologo vt.global_cursor_default=0/' "$CMDLINE"
 fi
 
 # ── 7. Enable services ────────────────────────────────────────────────────────
@@ -118,8 +125,15 @@ systemctl daemon-reload
 systemctl enable pigpiod
 systemctl enable uap0
 systemctl enable camera-auto
-systemctl disable optocam-hotspot 2>/dev/null || true  # started on demand only
-systemctl disable optocam-gallery  2>/dev/null || true  # started on demand only
+systemctl disable optocam-hotspot 2>/dev/null || true
+systemctl disable optocam-gallery 2>/dev/null || true
+systemctl disable hostapd 2>/dev/null || true
+systemctl disable dnsmasq 2>/dev/null || true
+systemctl disable ModemManager 2>/dev/null || true
+systemctl disable NetworkManager-wait-online.service 2>/dev/null || true
+systemctl disable avahi-daemon 2>/dev/null || true
+systemctl disable e2scrub_reap 2>/dev/null || true
+systemctl disable dphys-swapfile 2>/dev/null || true
 
 # ── 8. Done ───────────────────────────────────────────────────────────────────
 echo ""
