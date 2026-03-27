@@ -1,0 +1,19 @@
+[Unit]
+Description=OptoCam WiFi Hotspot
+After=uap0.service
+Requires=uap0.service
+
+[Service]
+Type=forking
+ExecStartPre=/bin/sh -c 'kill $(cat /run/hostapd.pid 2>/dev/null) 2>/dev/null || true; sleep 0.5'
+ExecStartPre=/bin/sh -c 'iw dev uap0 del 2>/dev/null; sleep 0.3; iw phy phy0 interface add uap0 type __ap; sleep 0.3'
+ExecStartPre=/bin/sh -c 'CH=$(iw dev wlan0 info 2>/dev/null | awk "/channel/{print \$2}"); [ -n "$CH" ] && sed -i "s/^channel=.*/channel=$CH/" /etc/hostapd/hostapd.conf || true'
+ExecStartPre=/sbin/ip addr add 192.168.4.1/24 dev uap0
+ExecStartPre=/sbin/ip link set uap0 up
+ExecStart=/usr/sbin/hostapd -B -P /run/hostapd.pid /etc/hostapd/hostapd.conf
+ExecStartPost=/bin/sh -c 'sleep 1 && systemctl start dnsmasq'
+ExecStop=/bin/sh -c 'kill $(cat /run/hostapd.pid 2>/dev/null) || true; systemctl stop dnsmasq; ip addr flush dev uap0 || true'
+PIDFile=/run/hostapd.pid
+
+[Install]
+WantedBy=multi-user.target
