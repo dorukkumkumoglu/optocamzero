@@ -121,9 +121,6 @@ fi
 if ! grep -q "consoleblank" "$CMDLINE"; then
     sed -i 's/$/ consoleblank=0/' "$CMDLINE"
 fi
-if ! grep -q "fsck.mode" "$CMDLINE"; then
-    sed -i 's/$/ fsck.mode=skip/' "$CMDLINE"
-fi
 
 # ── 7. Enable services ────────────────────────────────────────────────────────
 echo -e "${YELLOW}[7/8] Enabling services...${NC}"
