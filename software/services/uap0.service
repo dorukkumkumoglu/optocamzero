@@ -1,0 +1,13 @@
+[Unit]
+Description=Create uap0 virtual WiFi AP interface
+After=network.target
+Before=optocam-hotspot.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/sbin/iw dev wlan0 interface add uap0 type __ap
+ExecStop=/sbin/iw dev uap0 del
+
+[Install]
+WantedBy=multi-user.target

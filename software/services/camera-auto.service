@@ -1,0 +1,44 @@
+[Unit]
+Description=Optocam Zero Camera System
+After=local-fs.target
+DefaultDependencies=false
+ConditionPathExists=/home/dkumkum/optocamzero.py
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/dkumkum
+ExecStart=/usr/bin/python3 /home/dkumkum/optocamzero.py
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+Environment=SUDO_USER=dkumkum
+
+# Performance optimizations
+Nice=-10
+IOSchedulingClass=1
+IOSchedulingPriority=4
+
+# Security and resource limits
+NoNewPrivileges=false
+PrivateTmp=true
+ProtectHome=false
+ProtectSystem=false
+ReadWritePaths=/home/dkumkum /tmp /var/log
+
+# Hardware access permissions
+SupplementaryGroups=gpio spi i2c video dialout
+
+# Extended timeout settings for hardware initialization
+TimeoutStartSec=60
+TimeoutStopSec=30
+KillMode=mixed
+KillSignal=SIGINT
+FinalKillSignal=SIGKILL
+SendSIGKILL=yes
+
+[Install]
+WantedBy=multi-user.target
