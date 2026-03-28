@@ -1,6 +1,8 @@
 # Optocam Zero V1.0 — Bill of Materials
 Doruk Kumkumoğlu 2026
 
+<br>
+
 ## Electronics
 
 | Item | Qty |
@@ -16,6 +18,7 @@ Doruk Kumkumoğlu 2026
 | [2×20 Double Row Male GPIO Header](https://thepihut.com/products/break-away-0-1-2x20-pin-strip-dual-male-header) | x1 |
 | 0.3mm Ø Enameled Copper Wire (≥30cm length) — or any thin signal cable | x1 |
 
+<br>
 
 ## Fasteners
 
@@ -26,6 +29,7 @@ Doruk Kumkumoğlu 2026
 | M3×4mm×4mm Brass Heat Set Insert | x4 |
 | 12×3×1mm Neodymium Magnet | x8 |
 
+<br>
 
 ## Optional Fasteners
 
@@ -34,6 +38,7 @@ Doruk Kumkumoğlu 2026
 | M3×6mm Stainless Steel Hex-Drive Flat Head Screw (For Lanyard Lock) | x2 |
 | M3 Stainless Steel Nut (For Lanyard Lock) | x2 |
 
+<br>
 
 ## 3D Printed Parts and Materials
 
@@ -52,6 +57,7 @@ Doruk Kumkumoğlu 2026
 | Washer 1mm | PETG | x4 |
 | Washer 4mm | PETG | x4 |
 
+<br>
 
 ## Optional 3D Printed Parts
 
@@ -60,6 +66,7 @@ Doruk Kumkumoğlu 2026
 | Lanyard Lock Parts | PETG | x1 |
 | Camera Sleeve | TPU | x1 |
 
+<br>
 
 ## Optional – Cords & Straps
 
@@ -68,6 +75,7 @@ Doruk Kumkumoğlu 2026
 | Paracord – 1mm Ø, ≥30cm length | x1 |
 | Paracord – 4mm Ø, ≥1m length | x1 |
 
+<br>
 
 ## Tools
 
