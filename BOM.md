@@ -1,4 +1,4 @@
-# Optocam Zero V1.0 — Bill of Materials
+# Optocam Zero V1.0 Bill of Materials
 Doruk Kumkumoğlu 2026
 
 <br>
