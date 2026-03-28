@@ -3,10 +3,10 @@
 ## Requirements
 
 - Completed Optocam Zero with the correct components.
-- MicroSD card (16GB or larger, A2 type recommended for best performance). 
+- MicroSD card (16GB or larger, A2 type recommended for best performance).
 - A computer with internet access
 
----
+<br>
 
 ## Flashing the SD Card
 
@@ -14,13 +14,13 @@ Download Raspberry Pi Imager from [raspberrypi.com/software](https://www.raspber
 
 Before flashing, click **Edit Settings** and fill in your hostname, username, password, and WiFi credentials (remember to take note of this info). Go to the **Services** tab and enable SSH. Click Save, then flash the card.
 
----
+<br>
 
 ## First Boot
 
 Insert the SD card into the Pi and power it on. Wait about 1-2 minutes for it to boot and connect to your WiFi.
 
----
+<br>
 
 ## Connecting via SSH
 
@@ -32,7 +32,7 @@ ssh your-username@your-hostname.local
 
 Type `yes` when asked about the fingerprint, then enter your password.
 
----
+<br>
 
 ## Installing
 
@@ -52,13 +52,13 @@ git clone https://github.com/dorukkumkumoglu/optocamzero.git && sudo bash optoca
 
 Installation takes about 10-15 minutes. The Pi reboots automatically when done and the camera starts immediately.
 
----
+<br>
 
 ## Transferring Photos
 
 Long-press the joystick to activate transfer mode. Connect your phone or computer to the WiFi network called **Optocam Zero** (find password on the screen) and open **192.168.4.1** in a browser. The green dot in the transfer screen and the number next to it indicate how many devices are currently connected to the hotspot.
 
----
+<br>
 
 ## Troubleshooting
 
