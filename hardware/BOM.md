@@ -82,9 +82,12 @@ Doruk Kumkumoğlu 2026
 - 3D Printer
 - Soldering Iron
 - M3 Heat Set Insert Tip For Soldering Iron
+- Solder Pump
 - Solder
 - Flux
 - Kapton Tape
 - 2mm (M3) Hex Driver
 - Utility Knife
+- Pliers
+- Side Cutter
 - Tweezers
