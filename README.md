@@ -9,7 +9,7 @@ Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off 
 - Intuitive and simple camera interface and controls.
 - Autofocus camera.
 - Customizable color temperature.
-- Very easy and fast image transfer through custom hotspot interface. Optimized both for mobile and desktop.
+- Easy and fast image transfer through custom hotspot interface. Optimized both for mobile and desktop.
 - Screen dimming when inactive to preserve battery.
 - USB-C charging. Device can be used while charging.
 - Interchangable battery.
