@@ -36,7 +36,7 @@ Type `yes` when asked about the fingerprint, then enter your password.
 
 ## Installing
 
-Run the following commands one by one:
+Run the following commands:
 
 ```
 sudo apt-get update
