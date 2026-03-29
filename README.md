@@ -23,6 +23,7 @@ Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off 
 
 - 6 unique image filters included.
 - 2592x2592px Jpeg image capture. Image saves in the background while preview stays active.
+- 240x240px 1.4 inch lcd display.
 - Consistent 15–20 fps camera preview on the screen.
 - 22 seconds boot time.
 - Uses 14500 type li-ion battery.
