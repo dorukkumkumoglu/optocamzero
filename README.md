@@ -2,7 +2,7 @@
 
 Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off the shelf components.
 
-![exploded view](assets/exploded-2.jpg)
+![exploded view](assets/exploded-2.png)
 
 <br>
 
