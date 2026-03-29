@@ -7,7 +7,7 @@ Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off 
 ## Features
 
 - Very compact and easy to carry in your pocket.
-- Intuitive and simple camera interface.
+- Intuitive and simple camera interface and controls.
 - Unique image filters.
 - Off the shelf / common components for the electronics.
 - Fully 3D printed case parts (apart from fasteners).
@@ -23,6 +23,7 @@ Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off 
 
 - Autofocus camera
 - 6 unique image filters included.
+- 2592x2592px Jpeg image capture. Image saves in the background while preview stays active.
 - Customizable color temperature.
 - Consistent 15–20 fps camera preview on the screen.
 - 22 seconds boot time.
