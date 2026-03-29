@@ -10,7 +10,7 @@
 
 ## Flashing the SD Card
 
-Download Raspberry Pi Imager from [raspberrypi.com/software](https://www.raspberrypi.com/software/) and install it. Select **Raspberry Pi Zero 2W** as the device and **Raspberry Pi OS Lite (32-bit)** as the OS — you can find it under Raspberry Pi OS (other).
+Download Raspberry Pi Imager from [raspberrypi.com/software](https://www.raspberrypi.com/software/) and install it. Select **Raspberry Pi Zero 2W** as the device and **Raspberry Pi OS Lite (32-bit) Bookworm** as the OS — you can find it under Raspberry Pi OS (other).
 
 Before flashing, click **Edit Settings** and fill in your hostname, username, password, and WiFi credentials (remember to take note of this info). Go to the **Services** tab and enable SSH. Click Save, then flash the card.
 
