@@ -18,7 +18,7 @@ Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off 
 - Screen dimming when inactive to preserve battery.
 - USB-C charging. Device can be used while charging.
 - Interchangable battery.
-- Off the shelf / common components for the electronics.
+- Off the shelf/ common components for the electronics.
 - Fully 3D printed case parts (apart from fasteners).
 - 3D printable TPU protective sleeve and lanyard design is available.
 
@@ -36,7 +36,7 @@ Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off 
   
 <br>
 
-## What's Included
+## Currently Available:
 - Ready to print Bambu Studio project file available for transparent PETG or PETG / PETG-CF printing.
 - Detailed and accurate CAD file is made available for easy customization.
 - One command camera software installer for Raspberry Pi OS Bookworm.
