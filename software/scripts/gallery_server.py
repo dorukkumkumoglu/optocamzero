@@ -5,6 +5,7 @@ import io
 import json
 import time
 import zipfile
+import tempfile
 from flask import Flask, send_from_directory, render_template_string, Response, request
 
 PHOTOS_DIR = "/home/dkumkum/photos"
@@ -527,11 +528,22 @@ function toggleSel(e, circle) {
     }
 }
 
+function preloadAhead(idx) {
+    const ahead = files.slice(idx + 1, idx + 6);
+    if (ahead.length === 0) return;
+    fetch('/preload-ahead', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({files: ahead})
+    });
+}
+
 function openViewer(idx) {
     viewerIdx = idx;
     hqMode = false;
     document.getElementById('viewer-hq').classList.remove('active');
     updateViewer();
+    preloadAhead(idx);
     document.getElementById('viewer').classList.add('open');
     document.body.style.overflow = 'hidden';
 }
@@ -587,6 +599,7 @@ function stepViewer(dir) {
         hqMode = false;
         document.getElementById('viewer-hq').classList.remove('active');
         updateViewer();
+        preloadAhead(viewerIdx);
     }
 }
 
@@ -799,11 +812,20 @@ def thumb(filename):
         return "Not found", 404
     size = min(request.args.get('size', 400, type=int), 1200)
     cache_path = get_thumb_path(filename, size)
-    if not os.path.exists(cache_path):
+    if not os.path.exists(cache_path) or os.path.getsize(cache_path) == 0:
         from PIL import Image
         img = Image.open(path)
         img.thumbnail((size, size))
-        img.save(cache_path, "JPEG", quality=75)
+        tmp = tempfile.NamedTemporaryFile(dir=THUMB_DIR, delete=False, suffix='.tmp')
+        try:
+            img.save(tmp, "JPEG", quality=75)
+            tmp.close()
+            os.chmod(tmp.name, 0o644)
+            os.replace(tmp.name, cache_path)
+        except:
+            tmp.close()
+            os.unlink(tmp.name)
+            return "Error", 500
     with open(cache_path, "rb") as f:
         return Response(f.read(), mimetype="image/jpeg")
 
@@ -819,19 +841,51 @@ def preload():
             [f for f in os.listdir(PHOTOS_DIR) if f.lower().endswith(".jpg")],
             key=lambda f: int(f[len("Optocamzero_"):-len(".jpg")]) if f.startswith("Optocamzero_") and f[len("Optocamzero_"):-len(".jpg")].isdigit() else 0,
             reverse=True
-        )[:50]  # only preload 50 most recent
+        )[:10]  # preload 10 most recent on page load
         for filename in files:
             cache_path = get_thumb_path(filename, 1200)
-            if os.path.exists(cache_path):
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
                 continue
             try:
                 img = PILImage.open(os.path.join(PHOTOS_DIR, filename))
                 img.thumbnail((1200, 1200))
-                img.save(cache_path, "JPEG", quality=75)
+                tmp = tempfile.NamedTemporaryFile(dir=THUMB_DIR, delete=False, suffix='.tmp')
+                img.save(tmp, "JPEG", quality=75)
+                tmp.close()
+                os.chmod(tmp.name, 0o644)
+                os.replace(tmp.name, cache_path)
             except:
                 pass
             time.sleep(0.2)  # keep server responsive between generations
     threading.Thread(target=generate_all, daemon=True).start()
+    return "", 204
+
+
+@app.route("/preload-ahead", methods=["POST"])
+def preload_ahead():
+    import threading
+    from PIL import Image as PILImage
+    data = request.get_json()
+    filenames = data.get("files", [])
+    def generate():
+        for filename in filenames:
+            cache_path = get_thumb_path(filename, 1200)
+            if os.path.exists(cache_path) and os.path.getsize(cache_path) > 0:
+                continue
+            try:
+                path = os.path.join(PHOTOS_DIR, filename)
+                if not os.path.exists(path):
+                    continue
+                img = PILImage.open(path)
+                img.thumbnail((1200, 1200))
+                tmp = tempfile.NamedTemporaryFile(dir=THUMB_DIR, delete=False, suffix='.tmp')
+                img.save(tmp, "JPEG", quality=75)
+                tmp.close()
+                os.chmod(tmp.name, 0o644)
+                os.replace(tmp.name, cache_path)
+            except:
+                pass
+    threading.Thread(target=generate, daemon=True).start()
     return "", 204
 
 
