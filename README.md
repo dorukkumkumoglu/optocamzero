@@ -1,19 +1,21 @@
 # Optocam Zero V1.0
 
-Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off the shelf components.
+Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off the shelf components. 
+
+I designed Optocam Zero to have a very compact, carry everywhere and have fun sort of camera. As I was inspired by Kodak charmera and similar toy cameras, I wanted it to be feel playful, enjoyable and be intuitive to use. I also aimed to make it relatively easy to build so that others can also build one and have fun with it. That's why all the case parts are easily printable and for the electronics it uses off the shelf components that are easy to find.
+
+
 
 ![exploded view](assets/exploded-2.png)
 
 <br>
 
 
-
 ## Features
 - Very compact and easy to carry in your pocket.
 - Intuitive and simple camera interface and controls.
-- Autofocus camera.
-- 6 unique image filters included.
-- Customizable color temperature.
+- Uses autofocus camera module.
+- 8 photo filters included.
 - Easy and fast image transfer through custom hotspot interface. Optimized both for mobile and desktop.
 - Screen dimming when inactive to preserve battery.
 - USB-C charging. Device can be used while charging.
@@ -25,7 +27,6 @@ Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off 
 <br>
 
 ## Specs
-
 - 2592x2592px Jpeg image capture. Image saves in the background while preview stays active.
 - 240x240px 1.4 inch lcd display.
 - Consistent 15–20 fps camera preview on the screen.
@@ -36,19 +37,36 @@ Optocam Zero is a Raspberry Pi Zero based compact digital camera made using off 
   
 <br>
 
-## Currently Available:
-- Ready to print Bambu Studio project file available for transparent PETG or PETG / PETG-CF printing.
-- Detailed and accurate CAD file is made available for easy customization.
-- One command camera software installer for Raspberry Pi OS Bookworm.
+## Sample images
+
+Coming soon.
+
+<br>
+
+
+## How to Build Optocam Zero?
+
+I share all the neccesarry files and instructions of this project in this repo.
+
 
 <br>
 
 ## Hardware
 
-See the [hardware](hardware/) folder for CAD files, STL files, BOM, and print-ready files.
+See the [hardware](hardware/) folder for:
+
+- Bill of materials.
+- Hardware building guide(PDF).
+- Ready to print Bambu Studio project file for transparent PETG or PETG / PETG-CF printing.
+- Individual .stls for camera parts.
+- Accurate CAD file is for easy customization.
+
 
 <br>
 
 ## Software
 
-See the [software](software/) folder for the installation guide and software installer.
+See the [software](software/) folder for: 
+
+- Optocam Zero camera software installer and installation guide.
+- Camera controls information.
