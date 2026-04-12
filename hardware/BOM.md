@@ -44,7 +44,7 @@ Doruk Kumkumoğlu 2026
 
 | Item | Material | Qty |
 |------|----------|-----|
-| Camera Enclosure | PETG | x1 |
+| Enclosure | PETG | x1 |
 | Back Panel | PETG | x1 |
 | Camera Cover | PETG | x1 |
 | Camera Circle | PETG | x1 |
