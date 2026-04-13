@@ -25,7 +25,7 @@ Doruk Kumkumoğlu 2026
 | Item | Qty |
 |------|-----|
 | M3×16mm Stainless Steel Hex-Drive Flat Head Screw | x4 |
-| M2×6mm Screw | x2 |
+| M2×6mm Screw (comes with the Waveshare Display HAT) | x2 | 
 | M3×4mm×4mm Brass Heat Set Insert | x4 |
 | 12×3×1mm Neodymium Magnet | x8 |
 
