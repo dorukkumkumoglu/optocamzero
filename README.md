@@ -6,7 +6,7 @@ I designed Optocam Zero to have a very compact, carry everywhere and have fun so
 
 
 
-![exploded view](DSCG1207-Edit)
+![exploded view](DSCG1207-Edit.jpg)
 
 <br>
 
