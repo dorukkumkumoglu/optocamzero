@@ -31,7 +31,7 @@ I designed Optocam Zero to have a very compact, carry everywhere and have fun so
   
 <br>
 
-## Sample images
+## Sample Photos
 
 
 <img src="assets/Optocamzero_45.jpg" width="49%"/> <img src="assets/Optocamzero_166.jpg" width="49%"/>
