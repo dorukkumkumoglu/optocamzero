@@ -4,7 +4,7 @@ Everything you need to build an Optocam Zero, the 3D print files, required parts
 
 If you're considering building one, check the BOM to get an idea of the cost for required tools and parts. Also, have a look at the build guide, it will give you a clear idea of what the build involves.
 
-![exploded view](assets/DSCG1207-Edit.jpg)
+![exploded view](../assets/DSCG1207-Edit.jpg)
 
 <br>
 
