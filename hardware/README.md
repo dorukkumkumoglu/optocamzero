@@ -24,7 +24,7 @@ The optional case is printed with TPU. If you haven't printed with TPU before, c
 
 <br>
 
-## Before you start
+## Before You Start
 
 Make sure you have all the required parts, tools and 3D printed components ready before you begin.
 
