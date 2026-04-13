@@ -46,8 +46,10 @@ Coming soon.
 
 ## How to Build Optocam Zero?
 
-I share all the neccesarry files and instructions of this project in this repo.
-
+Everything you need to build an Optocam Zero yourself is included in this repo.
+All the 3d print files, Required parts list, and detailed step by step build guide can be found under the [hardware](hardware/) folder.
+If you're considering building one, check the [BOM](hardware/BOM.md) to get an idea of the cost for required tools and parts.
+Also have a look at the [build guide](hardware/optocamzero-build-guide.pdf), it will give you a clear idea of what the build involves.
 
 <br>
 
@@ -55,11 +57,11 @@ I share all the neccesarry files and instructions of this project in this repo.
 
 See the [hardware](hardware/) folder for:
 
-- Bill of materials.
-- Hardware building guide(PDF).
-- Ready to print Bambu Studio project file for transparent PETG or PETG / PETG-CF printing.
-- Individual .stls for camera parts.
-- Accurate CAD file is for easy customization.
+- [Bill of materials](hardware/BOM.md).
+- [Build guide](hardware/optocamzero-build-guide.pdf) (PDF).
+- [Bambu Studio project files](hardware/print-ready/) ready to print for transparent PETG or PETG / PETG-CF.
+- [Individual .stls](hardware/stls/) for camera parts.
+- [CAD file](hardware/cad/optocamzero_V1.0.step) for customization.
 
 
 <br>
