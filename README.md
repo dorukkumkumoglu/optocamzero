@@ -50,7 +50,7 @@ Everything you need to build an Optocam Zero yourself is included in this repo.
 All the 3d print files, Required parts list, and detailed step by step build guide can be found under the [hardware](hardware/) folder.
 
 If you're considering building one, check the [BOM](hardware/BOM.md) to get an idea of the cost for required tools and parts.
-Also have a look at the [build guide](hardware/optocamzero-build-guide.pdf), it will give you a clear idea of what the build involves.
+Also, have a look at the [build guide](hardware/optocamzero-build-guide.pdf), it will give you a clear idea of what the build involves.
 
 <br>
 
