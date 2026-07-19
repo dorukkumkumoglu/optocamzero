@@ -1,0 +1,3 @@
+#!/bin/sh
+# OptoCam: disabled for boot speed
+exit 0

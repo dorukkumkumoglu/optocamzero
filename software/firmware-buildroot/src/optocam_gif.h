@@ -1,7 +1,8 @@
 /* optocam_gif.h — GIF encoding for the exact OptoCam port.
  * Mirrors the Python save path: ONE adaptive palette built from frame 0
  * (median cut, 256 colours), every frame quantised against it with NO
- * dithering, 500ms/frame, infinite loop, disposal 1. GIF89a + LZW.
+ * dithering, caller-set frame delay (the recording interval), infinite
+ * loop, disposal 1. GIF89a + LZW.
  */
 #pragma once
 #include <cstdint>
@@ -210,6 +211,32 @@ inline bool gif_decode(const char *path, int &w, int &h,
     }
     fclose(f);
     return !rgb_frames.empty();
+}
+
+/* first frame's GCE delay in ms (0 if none/none yet) — playback pacing */
+inline int gif_first_delay_ms(const char *path) {
+    FILE *f = fopen(path, "rb");
+    if (!f) return 0;
+    uint8_t hdr[13];
+    if (fread(hdr, 1, 13, f) != 13) { fclose(f); return 0; }
+    if (hdr[10] & 0x80) fseek(f, 3 * (2 << (hdr[10] & 7)), SEEK_CUR);
+    auto skip_blocks = [&] { int n; while ((n = fgetc(f)) > 0) fseek(f, n, SEEK_CUR); };
+    int ms = 0, b;
+    while ((b = fgetc(f)) >= 0 && b != 0x3B && b != 0x2C) {
+        if (b != 0x21) break;
+        int label = fgetc(f), n = fgetc(f);
+        if (label == 0xF9 && n >= 4) {
+            uint8_t d[4]; if (fread(d, 1, 4, f) != 4) break;
+            ms = (d[1] | d[2] << 8) * 10;
+            fseek(f, n - 4, SEEK_CUR);
+            skip_blocks();
+            break;
+        }
+        fseek(f, n, SEEK_CUR);
+        skip_blocks();
+    }
+    fclose(f);
+    return ms;
 }
 
 /* count frames without decoding (image descriptors only) — PIL's n_frames */

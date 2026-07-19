@@ -1,5 +1,6 @@
 #!/bin/sh
 # Leave transfer mode: tear down AP + gallery, rejoin home WiFi.
+echo "=== transfer-stop $(cat /proc/uptime) ===" >> /data/transfer.log
 [ -f /run/gallery-server.pid ] && kill $(cat /run/gallery-server.pid) 2>/dev/null
 rm -f /run/gallery-server.pid
 [ -f /run/dnsmasq-transfer.pid ] && kill $(cat /run/dnsmasq-transfer.pid) 2>/dev/null

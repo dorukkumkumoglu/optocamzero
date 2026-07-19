@@ -10,14 +10,31 @@ static TextEngine g_te;
 inline double now_s() { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec + ts.tv_nsec / 1e9; }
 
 /* ---------- filters (exact _BASE_CURVES / _CHANNEL_LUTS) ---------- */
+/* Nine baked-in presets, then up to five user-created customs from the hotspot
+ * Effect Maker (/data/.effect0-4, one file per slot: params line + name line).
+ * Only slots whose file exists appear in the camera's list, compacted into
+ * indices CUSTOM_BASE..CUSTOM_BASE+count-1 in slot order. */
 static const char *FILTERS[9] = {"Film Standard","Punch","B&W","Deep","Sand","Eterna","TRI-X","Cutout","No Filter"};
+#define CUSTOM_BASE 9
+#define MAX_CUSTOM_FILTERS 5
 struct FilterLUTs { uint8_t r[256], g[256], b[256]; bool trix=false, cutout=false, identity=false; };
-static FilterLUTs g_luts[9];
+static FilterLUTs g_luts[CUSTOM_BASE + MAX_CUSTOM_FILTERS];
 static uint8_t g_trix_lut[256][3], g_cutout_lut[256];
 struct IspSet { float sat, con, bri; };
 static const IspSet FILM_ISP[9] = {                     /* order matches FILTERS */
     {0.85f,1,0},{1.3f,1,-0.05f},{0,1,0},{0.6f,1,0},{0.45f,1,0},{0.75f,1,0},{1,1,0},{0,1,0},{1,1,0}};
 static const int GRAIN[9] = {18,22,27,22,22,15,15,22,0};
+/* Custom-filter state, rebuilt by build_custom_filters(). g_custom_count is
+ * how many exist right now; per-custom ISP/grain/name are parallel to the LUT
+ * entries at g_luts[CUSTOM_BASE..]. */
+static int g_custom_count = 0;
+static char g_custom_names[MAX_CUSTOM_FILTERS][24];
+static IspSet g_custom_isp[MAX_CUSTOM_FILTERS];
+static int g_custom_grain[MAX_CUSTOM_FILTERS];
+inline int filter_count() { return CUSTOM_BASE + g_custom_count; }
+inline const char *filter_name(int idx) {
+    return idx < CUSTOM_BASE ? FILTERS[idx] : g_custom_names[idx - CUSTOM_BASE];
+}
 
 inline void _make_curve(uint8_t *out, std::initializer_list<std::pair<int,int>> pts) {
     std::vector<std::pair<int,int>> p(pts);
@@ -27,6 +44,97 @@ inline void _make_curve(uint8_t *out, std::initializer_list<std::pair<int,int>> 
         float v = p[i-1].second + t * (p[i].second - p[i-1].second);
         out[x] = (uint8_t)std::clamp(v, 0.0f, 255.0f);
     }
+}
+/* Monotone-cubic (Fritsch–Carlson) curve through 5 points at x=0,64,128,192,255
+ * — the custom filters' optional "smooth" interpolation. Monotone on purpose:
+ * plain splines overshoot past 0/255 between close points and the clamp would
+ * flat-top the curve. Presets never use this; their look is the linear
+ * _make_curve above, byte-for-byte as ported. Mirrors fxCurveLUT(smooth) in
+ * the hotspot's Effect Maker preview. */
+inline void _make_curve_smooth(uint8_t *out, const int cy[5]) {
+    static const int XS[5] = {0, 64, 128, 192, 255};
+    float d[4], m[5];
+    for (int i = 0; i < 4; i++) d[i] = (float)(cy[i+1] - cy[i]) / (XS[i+1] - XS[i]);
+    m[0] = d[0]; m[4] = d[3];
+    for (int i = 1; i < 4; i++) m[i] = (d[i-1] * d[i] <= 0) ? 0 : (d[i-1] + d[i]) / 2;
+    for (int i = 0; i < 4; i++) {
+        if (d[i] == 0) { m[i] = 0; m[i+1] = 0; continue; }
+        float a = m[i] / d[i], b = m[i+1] / d[i], s = a*a + b*b;
+        if (s > 9.0f) { float t = 3.0f / sqrtf(s); m[i] = t*a*d[i]; m[i+1] = t*b*d[i]; }
+    }
+    for (int x = 0; x < 256; x++) {
+        int i = 0; while (i < 3 && x > XS[i+1]) i++;
+        float h = (float)(XS[i+1] - XS[i]), t = (x - XS[i]) / h, t2 = t*t, t3 = t2*t;
+        float v = cy[i] * (2*t3 - 3*t2 + 1) + h * m[i] * (t3 - 2*t2 + t)
+                + cy[i+1] * (-2*t3 + 3*t2) + h * m[i+1] * (t3 - t2);
+        out[x] = (uint8_t)std::clamp(v, 0.0f, 255.0f);
+    }
+}
+/* Load one slot file into the custom position `pos` (LUT at CUSTOM_BASE+pos).
+ * Format: line 1 "y0 y1 y2 y3 y4  mr mg mb  sat grain [smooth]" — a 5-point
+ * tone curve (values at x=0,64,128,192,255), per-channel tint multipliers, ISP
+ * saturation, grain, and an optional interpolation flag (0 linear / 1 monotone
+ * cubic; absent = linear, so pre-toggle files keep their look); line 2 the
+ * display name. Params are read from the LINE (fgets+sscanf), never raw fscanf
+ * — a trailing optional float would otherwise swallow a name that starts with
+ * digits. Returns false if the file is missing or the params are unusable. */
+inline bool _load_custom_slot(const char *path, int pos, const char *fallback_name) {
+    FILE *f = fopen(path, "r");
+    if (!f) return false;
+    char line[256];
+    float a[11];
+    int n = 0;
+    if (fgets(line, sizeof line, f))
+        n = sscanf(line, "%f %f %f %f %f %f %f %f %f %f %f",
+                   &a[0], &a[1], &a[2], &a[3], &a[4], &a[5], &a[6], &a[7], &a[8], &a[9], &a[10]);
+    char name[sizeof g_custom_names[0]] = {0};
+    if (n >= 10) {
+        int c; size_t len = 0;
+        while ((c = fgetc(f)) != '\n' && c != EOF)
+            if (len < sizeof(name) - 1 && c >= 32 && c < 127) name[len++] = (char)c;
+        name[len] = 0;
+    }
+    fclose(f);
+    if (n < 10) return false;
+    bool smooth = (n >= 11 && a[10] >= 0.5f);
+    auto ci = [](int v) { return v < 0 ? 0 : v > 255 ? 255 : v; };
+    auto cf = [](float v, float lo, float hi) { return v < lo ? lo : v > hi ? hi : v; };
+    uint8_t cur[256];
+    int cy[5] = {ci((int)a[0]), ci((int)a[1]), ci((int)a[2]), ci((int)a[3]), ci((int)a[4])};
+    if (smooth)
+        _make_curve_smooth(cur, cy);
+    else
+        _make_curve(cur, {{0, cy[0]}, {64, cy[1]}, {128, cy[2]}, {192, cy[3]}, {255, cy[4]}});
+    float mr = cf(a[5], 0.2f, 2.0f), mg = cf(a[6], 0.2f, 2.0f), mb = cf(a[7], 0.2f, 2.0f);
+    FilterLUTs &c = g_luts[CUSTOM_BASE + pos];
+    for (int i = 0; i < 256; i++) {
+        c.r[i] = (uint8_t)std::clamp(cur[i] * mr, 0.f, 255.f);
+        c.g[i] = (uint8_t)std::clamp(cur[i] * mg, 0.f, 255.f);
+        c.b[i] = (uint8_t)std::clamp(cur[i] * mb, 0.f, 255.f);
+    }
+    c.trix = c.cutout = c.identity = false;
+    g_custom_isp[pos] = {cf(a[8], 0.0f, 2.0f), 1.0f, 0.0f};
+    g_custom_grain[pos] = (int)cf(a[9], 0.f, 60.f);
+    snprintf(g_custom_names[pos], sizeof g_custom_names[pos], "%s",
+             name[0] ? name : fallback_name);
+    return true;
+}
+
+/* Rescan /data/.effect0-4 and rebuild every existing custom filter. Slots are
+ * compacted (slot files 0 and 2 -> filter indices 9 and 10). Falls back to the
+ * pre-slot /data/.effect as a single "Custom" if no slot file exists — a
+ * firmware-only update must not lose the user's old effect. Never touches
+ * g_luts[0..8]. Re-called on data-ready and when leaving transfer mode. */
+inline void build_custom_filters() {
+    int pos = 0;
+    char path[32], defname[16];
+    for (int slot = 0; slot < MAX_CUSTOM_FILTERS; slot++) {
+        snprintf(path, sizeof path, "/data/.effect%d", slot);
+        snprintf(defname, sizeof defname, "Custom %d", slot + 1);
+        if (_load_custom_slot(path, pos, defname)) pos++;
+    }
+    if (pos == 0 && _load_custom_slot("/data/.effect", 0, "Custom")) pos = 1;
+    g_custom_count = pos;
 }
 inline void filters_init() {
     uint8_t bw[256], pu[256], sa[256], de[256], et[256], fs[256];
@@ -63,6 +171,7 @@ inline void filters_init() {
     g_luts[7].cutout = true;                            /* Cutout */
     for (int i = 0; i < 256; i++) g_cutout_lut[i] = i < 65 ? 0 : i < 130 ? 128 : 255;
     g_luts[8].identity = true;                          /* No Filter */
+    build_custom_filters();                             /* customs from /data/.effect0-3 */
 }
 /* apply in place on RGB triplets (r,g,b order), n pixels */
 inline void filter_apply(uint8_t *rgb, size_t n, int idx) {
@@ -123,7 +232,7 @@ inline void grain_apply(uint8_t *rgb, int w, int h, int intensity) {
 }
 
 /* ---------- ISO / shutter tables ---------- */
-static const int STD_ISO[13] = {100,125,160,200,250,320,400,500,640,800,1000,1250,1600};
+static const int STD_ISO[16] = {100,125,160,200,250,320,400,500,640,800,1000,1250,1600,2000,2500,3200};
 static const struct { int us; const char *lbl; } STD_SHUTTER[36] = {
     {125,"1/8000"},{156,"1/6400"},{200,"1/5000"},{250,"1/4000"},{313,"1/3200"},{400,"1/2500"},
     {500,"1/2000"},{625,"1/1600"},{800,"1/1250"},{1000,"1/1000"},{1250,"1/800"},{1563,"1/640"},
@@ -223,8 +332,14 @@ inline std::map<int, Img> g_filt_ind_cache;   /* guarded by g_render_mtx */
 inline Img &filter_indicator(int idx) {
     auto it = g_filt_ind_cache.find(idx);
     if (it == g_filt_ind_cache.end())
-        it = g_filt_ind_cache.emplace(idx, build_filter_indicator(FILTERS[idx])).first;
+        it = g_filt_ind_cache.emplace(idx, build_filter_indicator(filter_name(idx))).first;
     return it->second;
+}
+/* Custom names/count can change while in transfer mode; the cached pills for
+ * indices >= CUSTOM_BASE are then stale. Call under g_render_mtx. */
+inline void drop_custom_filter_sprites() {
+    g_filt_ind_cache.erase(g_filt_ind_cache.lower_bound(CUSTOM_BASE),
+                           g_filt_ind_cache.end());
 }
 
 /* ---------- centre message sprite (font 25, centred, blur 4) ---------- */

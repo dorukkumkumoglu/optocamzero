@@ -50,6 +50,23 @@ static int gpio_out(int chipfd, unsigned off, int val) {
     return r.fd;
 }
 static void gpio_set(int fd, int v) { struct gpiohandle_data d; d.values[0] = v; ioctl(fd, GPIOHANDLE_SET_LINE_VALUES_IOCTL, &d); }
+/* Memory-mapped fast path for the backlight pin (BCM 24): at the dim duty the
+ * PWM pulse is 63µs, and the gpiochip ioctl's kernel-crossing latency under
+ * IRQ load lands on the pulse edges as faint brightness wander. A register
+ * store makes the edges nanosecond-exact regardless of load. The line stays
+ * requested as output via gpiochip; both paths reach the same pad. */
+static volatile uint32_t *g_gpioreg = nullptr;
+static void bl_fast_init(void) {
+    int fd = open("/dev/gpiomem", O_RDWR | O_SYNC);
+    if (fd < 0) return;                     /* no gpiomem: ioctl fallback */
+    void *m = mmap(nullptr, 4096, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (m != MAP_FAILED) g_gpioreg = (volatile uint32_t *)m;
+}
+static inline void bl_set(int v) {
+    if (g_gpioreg) g_gpioreg[v ? 7 : 10] = 1u << 24;   /* GPSET0 / GPCLR0 */
+    else gpio_set(bl_fd, v);
+}
 static void spi_write(const uint8_t *b, size_t len) {
     size_t off = 0;
     while (off < len) { size_t n = len - off; if (n > 65536) n = 65536;
@@ -143,31 +160,32 @@ static void wb_apply(uint8_t *p, size_t npx, bool bgr) {
         p[ri] = WBL[0][p[ri]]; p[1] = WBL[1][p[1]]; p[bi] = WBL[2][p[bi]];
     }
 }
-static void build_565_luts(void) {
-    /* panel white-point calibration: this unit's LCD batch runs bluer than
-     * the original device's (identical init registers + identical conversion
-     * were verified — the difference is the glass). Per-channel gains fold
-     * into the LUTs at zero per-frame cost. /data/.dispcal holds "R G B"
-     * floats; missing file = neutral. */
-    float gr = 1.0f, gg = 1.0f, gb = 1.0f, sat = 1.0f;
-    FILE *cal = fopen("/data/.dispcal", "r");           /* /data mounts late — */
-    if (!cal) cal = fopen("/usr/share/optocam/dispcal", "r");  /* baked fallback */
-    if (cal) {
-        float r, g, b, s;
-        int n = fscanf(cal, "%f %f %f %f", &r, &g, &b, &s);
-        if (n >= 3 && r > 0.5f && r <= 1.5f && g > 0.5f && g <= 1.5f && b > 0.5f && b <= 1.5f) {
-            gr = r; gg = g; gb = b;
-            if (n == 4 && s >= 0.5f && s <= 2.0f) sat = s;
-        }
-        fclose(cal);
-    }
+/* device baseline contrast: photos map i -> (i-128)*1.15 + 123. The calibration
+ * "contrast" slider scales that 1.15 (default keeps the shipped look). */
+static constexpr float BASE_CONTRAST = 1.15f;
+/* Calibration transfer applied per display pixel, baked into the LUTs so it
+ * costs nothing per frame. Order: contrast -> gamma -> per-channel gain (+ an
+ * optional saturation matrix). Returns a normalised 0..1 tone; the per-channel
+ * gain is applied by the caller. */
+static inline float calib_tone(int i, float contrast, float inv_gamma) {
+    float c = (i - 128) * contrast + 123.0f;
+    c = c < 0 ? 0 : c > 255 ? 255 : c;
+    float n = c / 255.0f;
+    if (inv_gamma < 0.999f || inv_gamma > 1.001f) n = powf(n, inv_gamma);
+    return n;
+}
+/* core LUT builder: per-channel white-point gains, saturation, gamma and
+ * contrast. Split out so the transfer-mode screen calibrator can rebuild the
+ * LUTs live from slider values (see /data/.calib) without re-reading a file. */
+static void build_565_luts_from(float gr, float gg, float gb, float sat,
+                                float gamma, float contrast) {
+    float inv_g = (gamma > 0.05f) ? 1.0f / gamma : 1.0f;
+    auto q = [](float v) -> uint16_t { return v < 0 ? 0 : v > 255 ? 255 : (uint16_t)v; };
     for (int i = 0; i < 256; i++) {
-        float c = (i - 128) * 1.15f + 123.0f;
-        c = c < 0 ? 0 : c > 255 ? 255 : c;
-        auto q = [](float v) -> uint16_t { return v < 0 ? 0 : v > 255 ? 255 : (uint16_t)v; };
-        R565[i] = (q(c * gr) & 0xF8) << 8;
-        G565[i] = (q(c * gg) & 0xFC) << 3;
-        B565[i] = (q(c * gb) & 0xF8) >> 3;
+        float n = calib_tone(i, contrast, inv_g);
+        R565[i] = (q(255.0f * n * gr) & 0xF8) << 8;
+        G565[i] = (q(255.0f * n * gg) & 0xFC) << 3;
+        B565[i] = (q(255.0f * n * gb) & 0xF8) >> 3;
     }
     if (sat < 0.99f || sat > 1.01f) {
         /* standard luma-preserving saturation matrix, white gains folded in */
@@ -179,12 +197,47 @@ static void build_565_luts(void) {
         for (int i = 0; i < 3; i++)
             for (int j = 0; j < 3; j++)
                 for (int v = 0; v < 256; v++) {
-                    float c = (v - 128) * 1.15f + 123.0f;
-                    c = c < 0 ? 0 : c > 255 ? 255 : c;
-                    M9[i][j][v] = (int16_t)lrintf(W[i] * S[i][j] * c);
+                    float base = 255.0f * calib_tone(v, contrast, inv_g);
+                    M9[i][j][v] = (int16_t)lrintf(W[i] * S[i][j] * base);
                 }
         g_sat_on = true;
     } else g_sat_on = false;
+}
+/* Calibrated backlight duty, 51..255 (255 = solid DC, no PWM). The "screen
+ * brightness" calibration slider lands here — real luminance via the BL pin,
+ * never a pixel gain, so it can't clip highlights or cost tonal bits. */
+static std::atomic<int> g_bl_level(255);
+/* panel white-point calibration: this unit's LCD batch runs bluer than the
+ * original device's (identical init registers + identical conversion were
+ * verified — the difference is the glass). /data/.dispcal holds up to seven
+ * floats "GR GG GB [SAT GAMMA CONTRAST BACKLIGHT]" (written by the hotspot
+ * Screen-Calibration panel on save); absent fields fall back to neutral / the
+ * baked contrast / full backlight. The baked fallback file stays 3-float and
+ * back-compatible. Gain bounds are INCLUSIVE of 0.2 — the server clamps to
+ * exactly 0.2, and `>` here used to reject such a profile wholesale. */
+static bool read_dispcal(const char *path, float &gr, float &gg, float &gb,
+                         float &sat, float &gamma, float &contrast, float &bl) {
+    FILE *cal = fopen(path, "r");
+    if (!cal) return false;
+    float r, g, b, s = 1.0f, ga = 1.0f, ct = BASE_CONTRAST, lv = 1.0f;
+    int n = fscanf(cal, "%f %f %f %f %f %f %f", &r, &g, &b, &s, &ga, &ct, &lv);
+    fclose(cal);
+    if (n >= 3 && r >= 0.2f && r <= 2.5f && g >= 0.2f && g <= 2.5f && b >= 0.2f && b <= 2.5f) {
+        gr = r; gg = g; gb = b;
+        sat      = (n >= 4 && s  >= 0.0f && s  <= 2.5f) ? s  : 1.0f;
+        gamma    = (n >= 5 && ga >= 0.3f && ga <= 3.0f) ? ga : 1.0f;
+        contrast = (n >= 6 && ct >= 0.2f && ct <= 2.5f) ? ct : BASE_CONTRAST;
+        bl       = (n >= 7 && lv >= 0.2f && lv <= 1.0f) ? lv : 1.0f;
+        return true;
+    }
+    return false;
+}
+static void build_565_luts(void) {
+    float gr = 1.0f, gg = 1.0f, gb = 1.0f, sat = 1.0f, gamma = 1.0f, contrast = BASE_CONTRAST, bl = 1.0f;
+    if (!read_dispcal("/data/.dispcal", gr, gg, gb, sat, gamma, contrast, bl))   /* /data mounts late — */
+        read_dispcal("/usr/share/optocam/dispcal", gr, gg, gb, sat, gamma, contrast, bl);  /* baked fallback */
+    build_565_luts_from(gr, gg, gb, sat, gamma, contrast);
+    g_bl_level.store((int)lrintf(bl * 255.0f));
 }
 /* Writes now happen in the panel's PHYSICAL scan order (MADCTL 0x00) and the
  * old hardware remap (0x70: MV|MX) is applied in software — same image, but
@@ -235,6 +288,87 @@ static void display_blit(const uint8_t *rgb) {
 static void display_fill(uint16_t c) {
     for (int i = 0; i < 240*240; i++) { fb565[i*2] = c >> 8; fb565[i*2+1] = c & 0xFF; }
     fb_flush();
+}
+/* ---- screen calibration (transfer mode only, off the boot path) ----
+ * Blit a straight 240x240 RGB buffer through px565() so the live white-point
+ * LUTs apply — the panel shows the calibration pattern exactly as it will
+ * render real photos. */
+static void display_blit_240(const uint8_t *rgb) {
+    int v = fb_variant();
+    for (int i = 0; i < 240; i++) {
+        uint8_t *out = fb565 + i * 240 * 2;
+        for (int j = 0; j < 240; j++) {
+            int x, y; fb_map(v, i, j, x, y);
+            const uint8_t *px = rgb + ((size_t)y * 240 + x) * 3;
+            uint16_t c = px565(px[0], px[1], px[2]);   /* calib.rgb is RGB order */
+            out[j*2] = c >> 8; out[j*2+1] = c & 0xFF;
+        }
+    }
+    fb_flush();
+}
+/* selectable reference pattern: /usr/share/optocam/calib_<name>.rgb, chosen by
+ * /data/.calib_img ("color" | "gray" | "photo"). Always leaves a usable buffer:
+ * on any read failure it falls back to the colour chart, then to a flat mid-gray
+ * fill — so the calibration screen is never blank. Returns true always. */
+static bool load_calib_image(uint8_t *rgb240, const char *name) {
+    const size_t NB = (size_t)240 * 240 * 3;
+    const char *tries[3];
+    char path[64];
+    snprintf(path, sizeof path, "/usr/share/optocam/calib_%s.rgb", name);
+    tries[0] = path;
+    tries[1] = "/usr/share/optocam/calib_color.rgb";
+    tries[2] = "/usr/share/optocam/calib.rgb";        /* legacy single-file name */
+    for (int t = 0; t < 3; t++) {
+        FILE *f = fopen(tries[t], "rb");
+        if (!f) continue;
+        size_t n = fread(rgb240, 1, NB, f);
+        fclose(f);
+        if (n == NB) return true;
+    }
+    memset(rgb240, 128, NB);                           /* flat gray so it's never blank */
+    return true;
+}
+static const char *CALIB_IMG_NAMES[3] = {"color", "gray", "photo"};
+#define N_CALIB_IMGS 3
+static void read_calib_img_name(char *out, size_t cap) {   /* -> one of CALIB_IMG_NAMES */
+    snprintf(out, cap, "color");
+    FILE *f = fopen("/data/.calib_img", "r");
+    if (!f) return;
+    char buf[16] = {0};
+    if (fscanf(f, "%15s", buf) == 1)
+        for (int k = 0; k < N_CALIB_IMGS; k++)
+            if (!strcmp(buf, CALIB_IMG_NAMES[k])) { snprintf(out, cap, "%s", buf); break; }
+    fclose(f);
+}
+/* joystick left/right on the camera cycles the pattern by writing the same
+ * /data/.calib_img the hotspot reads, so LCD and phone stay in sync. */
+static void cycle_calib_img(const char *cur, int dir) {
+    int i = 0;
+    for (int k = 0; k < N_CALIB_IMGS; k++) if (cur && !strcmp(cur, CALIB_IMG_NAMES[k])) { i = k; break; }
+    i = (i + dir + N_CALIB_IMGS) % N_CALIB_IMGS;
+    FILE *f = fopen("/data/.calib_img", "w");
+    if (f) { fprintf(f, "%s\n", CALIB_IMG_NAMES[i]); fclose(f); }
+}
+/* live slider values the calibrator writes as the user drags:
+ * "GR GG GB [SAT GAMMA CONTRAST BACKLIGHT]". Wider accepted range than the
+ * saved profile since temperature/tint*channel can push a gain past 1.5.
+ * Bounds inclusive of 0.2, matching read_dispcal. */
+static bool read_calib_live(float &r, float &g, float &b, float &s,
+                            float &gamma, float &contrast, float &bl) {
+    FILE *f = fopen("/data/.calib", "r");
+    if (!f) return false;
+    float rr, gg, bb, ss = 1.0f, ga = 1.0f, ct = BASE_CONTRAST, lv = 1.0f;
+    int n = fscanf(f, "%f %f %f %f %f %f %f", &rr, &gg, &bb, &ss, &ga, &ct, &lv);
+    fclose(f);
+    if (n >= 3 && rr >= 0.2f && rr <= 2.5f && gg >= 0.2f && gg <= 2.5f && bb >= 0.2f && bb <= 2.5f) {
+        r = rr; g = gg; b = bb;
+        s        = (n >= 4 && ss >= 0.0f && ss <= 2.5f) ? ss : 1.0f;
+        gamma    = (n >= 5 && ga >= 0.3f && ga <= 3.0f) ? ga : 1.0f;
+        contrast = (n >= 6 && ct >= 0.2f && ct <= 2.5f) ? ct : BASE_CONTRAST;
+        bl       = (n >= 7 && lv >= 0.2f && lv <= 1.0f) ? lv : 1.0f;
+        return true;
+    }
+    return false;
 }
 
 /* ---------- buttons (active-low, internal pull-ups) ---------- */
@@ -287,13 +421,113 @@ static float g_meta_gain = 1.0f; static int32_t g_meta_exp = 10000;
 /* AWB diagnostics (logged with the fps meter) */
 static std::atomic<int> g_meta_ct(0);
 static std::atomic<int> g_meta_cgr_x100(0), g_meta_cgb_x100(0);
+static std::atomic<int> g_meta_dg_x100(100);   /* ISP digital gain — feeds the
+                                                * preview WYSIWYG dim + diagnostics */
 static std::atomic<bool> g_ae_locked(false);
 static std::atomic<int32_t> g_ae_lock_exp(10000);
 static std::atomic<float> g_ae_lock_gain(1.0f);
-static constexpr float GIF_MAX_GAIN = 12.5f;          /* ISO 1250 */
+/* Exposure settings from the hotspot "Camera Settings" panel: /data/.aelimits
+ * holds "SHUTTER_DEN METERING_IDX DGAIN_BOOST"; a missing file means factory
+ * (50 0 0) — 1/50 s is the preview cap this app has always run, and
+ * centre-weighted is the tuning default, so factory changes nothing. The
+ * shutter cap applies natively via FrameDurationLimits; metering maps straight
+ * onto AeMeteringMode (0 centre-weighted, 1 spot, 2 matrix). DGAIN_BOOST=1
+ * lets captures ask for 32x total gain instead of the sensor's 16x analog
+ * ceiling — the RPi IPA delivers the >16x remainder as ISP digital gain. */
+static std::atomic<int64_t> g_max_exp_us(20000);  /* 1/50 s */
+static std::atomic<int> g_metering(0);
+static std::atomic<bool> g_dgain_boost(false);
+/* capture gain ceiling, shared by stills and the GIF exposure lock */
+static float capture_max_gain(void) { return g_dgain_boost.load() ? 32.0f : 16.0f; }
+/* Stills run on MANUAL exposure copied from the preview's converged AE: the
+ * still mode's ~70ms frames make FrameDurationLimits useless as a shutter cap
+ * there (measured: a 1/125 cap still produced a 60ms still while the AGC
+ * re-adapted), and the preview values are already capped — and WYSIWYG with
+ * the screen. 0 = fall back to AE (no preview metadata yet). */
+static std::atomic<int32_t> g_still_exp_ovr(0);
+static std::atomic<float> g_still_gain_ovr(1.0f);
 static constexpr int32_t GIF_MAX_EXP_US = 100000;     /* 1/10s */
 static std::atomic<int> g_awb_idx(AWB_DEFAULT_IDX);
 static std::atomic<bool> g_ctrl_dirty(true);
+static std::atomic<bool> g_live_neutral(false);  /* LIVE tab: ship raw frames —
+                                                  * the browser applies the filter,
+                                                  * so the active filter's ISP
+                                                  * (e.g. B&W sat=0) must not.
+                                                  * Also forces auto-WB: filters
+                                                  * are designed on a neutral,
+                                                  * auto-balanced base. */
+static int32_t meter_mode(void) {
+    switch (g_metering.load()) {
+        case 1:  return controls::MeteringSpot;
+        case 2:  return controls::MeteringMatrix;
+        default: return controls::MeteringCentreWeighted;
+    }
+}
+static void load_ae_limits(void) {
+    int den = 50, met = 0, dgb = 0;
+    FILE *f = fopen("/data/.aelimits", "r");
+    if (f) {
+        int n = fscanf(f, "%d %d %d", &den, &met, &dgb);
+        if (n < 1) den = 50;
+        if (n < 2) met = 0;                   /* pre-metering files: den only */
+        if (n < 3) dgb = 0;                   /* pre-boost files: den+met only */
+        fclose(f);
+    }
+    if (den < 20) den = 50;                   /* sanity — UI offers 30..125 */
+    if (den > 125) den = 125;                 /* sensor floor: binned mode is 120fps,
+                                               * faster caps just get pipeline-clamped */
+    if (met < 0 || met > 2) met = 0;
+    int64_t exp_us = 1000000 / den;
+    bool changed = g_max_exp_us.exchange(exp_us) != exp_us;
+    if (g_metering.exchange(met) != met) changed = true;
+    g_dgain_boost.store(dgb == 1);            /* captures only — no dirty needed */
+    if (changed)
+        g_ctrl_dirty.store(true);   /* boot loads this after preview starts —
+                                     * the dirty path re-applies live */
+}
+/* Translate preview-mode AE values (live or locked) into the still mode's
+ * manual exposure. THE one transform shared by do_capture and the HUD
+ * readout, so what the screen shows at the shutter press is exactly what the
+ * photo gets. Exposure scales by the mode sensitivity ratio (the binned
+ * preview mode gathers ~2.5x the light of the un-binned still mode —
+ * empirically tuned on-device by matching capture frame means: 4.0 was ~+18%
+ * bright, 3.0 ~+15%, 2.5 lands it); overflow past the min-shutter cap moves
+ * into gain (EV-preserving), clamped at the 16x sensor max, where genuinely
+ * dim scenes take an honestly darker still. */
+static constexpr double MODE_SENS_RATIO = 2.5;   /* binned preview vs still sensitivity */
+static void still_exposure_from(int32_t pexp, float pgain, int32_t &exp_out, float &gain_out) {
+    double exp2 = (double)pexp * MODE_SENS_RATIO, gain2 = pgain;
+    int64_t ecap = g_max_exp_us.load();
+    if (ecap > 0 && exp2 > (double)ecap) {
+        gain2 = pgain * (exp2 / (double)ecap);
+        exp2 = (double)ecap;
+    }
+    float maxg = capture_max_gain();
+    if (gain2 > (double)maxg) gain2 = maxg;
+    exp_out = (int32_t)exp2;
+    gain_out = (float)gain2;
+}
+/* set the moment the user changes filter/WB from the joystick, so the late
+ * /data-mounted startup defaults never yank a control out from under them. */
+static std::atomic<bool> g_user_touched(false);
+/* startup defaults written by the hotspot "Camera Settings" panel:
+ * "FILTER_IDX AWB_IDX". Applied once, only if the user hasn't already acted. */
+static void load_startup_defaults(void) {
+    if (g_user_touched.load()) return;
+    FILE *f = fopen("/data/.defaults", "r");
+    if (!f) return;
+    int fi = -1, ai = -1;
+    int n = fscanf(f, "%d %d", &fi, &ai);
+    fclose(f);
+    if (g_user_touched.load()) return;                 /* re-check after the read */
+    /* filter is read live per frame; bound is dynamic (presets + existing
+     * customs), so build_custom_filters() must have run before this. */
+    if (n >= 1 && fi >= 0 && fi < filter_count()) g_filter_idx.store(fi);
+    if (n >= 2 && ai >= 0 && ai < 5) {
+        g_awb_idx.store(ai);
+        g_ctrl_dirty.store(true);       /* AWB mode only re-applies to the camera on a dirty flag */
+    }
+}
 static std::atomic<double> g_filter_label_time(0), g_awb_changed_time(0);
 static std::atomic<int> g_saving(0);
 static std::atomic<double> g_capture_dot_time(0);
@@ -342,11 +576,35 @@ static void render_preview(const uint8_t *rgb, float gain, int exp_us) {
     unsigned ox = FW > 240 ? (FW - 240) / 2 : 0, oy = FH > 240 ? (FH - 240) / 2 : 0;
     static Img frame(240, 240);
     FilterLUTs &lut = g_luts[fidx];
+    /* WYSIWYG in the dark: the preview AGC outruns what a capture can deliver
+     * (analog 16x — 32x with boost — while the AGC also stacks its own digital
+     * gain, which captures never get). Dim the preview by the exact EV the
+     * photo will fall short, so the screen brightness IS the photo's. Frame
+     * pixels are gamma-encoded, so the linear ratio applies as f^(1/2.2).
+     * f≈1 whenever nothing clamps — the LUT pass is skipped entirely then. */
+    static uint8_t dimlut[256]; static float dim_last = -1;
+    bool dimming = false;
+    if (exp_us > 0 && gain > 0) {
+        int32_t se; float sg;
+        still_exposure_from(exp_us, gain, se, sg);
+        float pdg = g_meta_dg_x100.load() / 100.0f; if (pdg < 1.0f) pdg = 1.0f;
+        float f = (float)(((double)se * sg) /
+                          ((double)exp_us * gain * pdg * MODE_SENS_RATIO));
+        if (f < 0.97f) {
+            dimming = true;
+            float fg = std::pow(std::max(f, 0.01f), 1.0f / 2.2f);
+            if (std::fabs(fg - dim_last) > 0.005f) {
+                dim_last = fg;
+                for (int i = 0; i < 256; i++) dimlut[i] = (uint8_t)(i * fg + 0.5f);
+            }
+        }
+    }
     for (int y = 0; y < 240; y++)
         for (int x = 0; x < 240; x++) {
             int sx = 239 - y, sy = x;
             const uint8_t *px = rgb + (size_t)(oy + sy) * FSTRIDE + (size_t)(ox + sx) * 3;
             uint8_t r = px[2], g = px[1], b = px[0];
+            if (dimming) { r = dimlut[r]; g = dimlut[g]; b = dimlut[b]; }
             if (lut.trix) {
                 unsigned lu = (r*299u + g*587u + b*114u + 500u) / 1000u;
                 r = g_trix_lut[lu][0]; g = g_trix_lut[lu][1]; b = g_trix_lut[lu][2];
@@ -360,8 +618,16 @@ static void render_preview(const uint8_t *rgb, float gain, int exp_us) {
         }
 
     double now = now_s();
+    /* the readout predicts the CAPTURE: same transform as do_capture, so the
+     * shutter/ISO on screen at the press are the numbers the photo gets */
+    {
+        int32_t de = exp_us; float dgain = gain;
+        if (de > 0 && dgain > 0) still_exposure_from(de, dgain, de, dgain);
+        exp_us = de; gain = dgain;
+    }
     char isobuf[8];
     std::string iso = nearest_iso(gain, isobuf);
+    if (gain > 16.01f) iso += "+";     /* capture will use ISP digital gain */
     std::string shutter = exp_us > 0 ? nearest_shutter(exp_us) : "?";
     int aidx = g_awb_idx.load();
     bool awb_switching = now - g_awb_changed_time.load() < 1.0;
@@ -446,7 +712,7 @@ static void render_preview(const uint8_t *rgb, float gain, int exp_us) {
         composite_scaled_centre(frame, centre_msg_sprite(tmsg), sc, al);
     } else if (flt > 0 && now - flt < 1.5) {
         float al, sc; ease_centre_msg((float)(now - flt), 1.5f, al, sc);
-        composite_scaled_centre(frame, centre_msg_sprite(FILTERS[fidx]), sc, al);
+        composite_scaled_centre(frame, centre_msg_sprite(filter_name(fidx)), sc, al);
     } else if (flt > 0 && now - flt >= 1.5) g_filter_label_time.store(0);
 
     /* Img → RGB565 with contrast LUT, in panel scan order */
@@ -576,6 +842,20 @@ static void requestComplete(Request *req) {
         std::lock_guard<std::mutex> lk(still_mtx);
         if (!still_data) {
             still_data = static_cast<uint8_t *>(memmap[buf]);
+            {   /* what the shot ACTUALLY used — ground truth for the
+                 * min-shutter cap, which the still mode can't bind natively
+                 * (its ~14fps frames dwarf the cap; the AE state carries the
+                 * cap over from preview instead) */
+                auto ev = req->metadata().get(controls::ExposureTime);
+                auto gv = req->metadata().get(controls::AnalogueGain);
+                auto dgv = req->metadata().get(controls::DigitalGain);
+                auto cgv = req->metadata().get(controls::ColourGains);
+                printf("optocam: STILL exp=%dus ag=%.2f dg=%.2f cg=%.2f/%.2f cap=%lldus\n",
+                       ev ? *ev : -1, gv ? *gv : -1.0f, dgv ? *dgv : -1.0f,
+                       cgv ? (*cgv)[0] : -1.0f, cgv ? (*cgv)[1] : -1.0f,
+                       (long long)g_max_exp_us.load());
+                fflush(stdout);
+            }
             still_cv.notify_one();
         }
         return;                               /* hold the buffer until encoded */
@@ -604,6 +884,8 @@ static void requestComplete(Request *req) {
                 auto cg = req->metadata().get(controls::ColourGains);
                 if (ct) g_meta_ct.store(*ct);
                 if (cg) { g_meta_cgr_x100.store((int)((*cg)[0]*100)); g_meta_cgb_x100.store((int)((*cg)[1]*100)); }
+                auto dg = req->metadata().get(controls::DigitalGain);
+                if (dg) g_meta_dg_x100.store((int)(*dg * 100));
             }
             g_frame_seq.fetch_add(1);
         }
@@ -615,10 +897,18 @@ static void requestComplete(Request *req) {
     if (ctrl_dirty || ae_locked) {
         int fi = g_filter_idx.load();
         if (ctrl_dirty) {
-            req->controls().set(controls::Saturation, FILM_ISP[fi].sat);
-            req->controls().set(controls::Contrast, FILM_ISP[fi].con);
-            req->controls().set(controls::Brightness, FILM_ISP[fi].bri);
-            req->controls().set(controls::AwbMode, AWB_MODES[g_awb_idx.load()].mode);
+            IspSet cisp = (fi >= CUSTOM_BASE) ? g_custom_isp[fi - CUSTOM_BASE] : FILM_ISP[fi];
+            if (g_live_neutral.load()) cisp = {1.0f, 1.0f, 0.0f};
+            req->controls().set(controls::Saturation, cisp.sat);
+            req->controls().set(controls::Contrast, cisp.con);
+            req->controls().set(controls::Brightness, cisp.bri);
+            req->controls().set(controls::AwbMode, g_live_neutral.load()
+                ? (int)controls::AwbAuto            /* LIVE tab: always auto-WB */
+                : AWB_MODES[g_awb_idx.load()].mode);
+            int64_t lim[2] = { 100, g_max_exp_us.load() };   /* min-shutter cap, may
+                                                              * have loaded post-start */
+            req->controls().set(controls::FrameDurationLimits, Span<const int64_t, 2>(lim, 2));
+            req->controls().set(controls::AeMeteringMode, meter_mode());
             if (!ae_locked) req->controls().set(controls::AeEnable, true);
         }
         if (ae_locked) {
@@ -659,14 +949,25 @@ static bool setup_stream(CameraConfiguration *config, bool continuous_af) {
         requests.push_back(std::move(req));
     }
     ControlList ctrls;
+    int64_t exp_cap = g_max_exp_us.load();     /* user minimum shutter, 1/50 factory */
     if (continuous_af) {
         ctrls.set(controls::AfMode, controls::AfModeContinuous);
         ctrls.set(controls::AfSpeed, controls::AfSpeedFast);
-        /* keep preview and GIF capture at the same shutter cap: >= 1/40s */
-        int64_t lim[2] = { 100, 25000 };
+    }
+    {   /* the minimum-shutter cap binds AE natively — a frame can't be longer
+         * than its duration. Preview/GIF and stills share the user's cap, so
+         * 1/30 also buys a brighter (30 fps) live view. */
+        int64_t lim[2] = { 100, exp_cap };
         ctrls.set(controls::FrameDurationLimits, Span<const int64_t, 2>(lim, 2));
     }
-    if (g_ae_locked.load()) {
+    ctrls.set(controls::AeMeteringMode, meter_mode());
+    if (!continuous_af && g_still_exp_ovr.load() > 0) {
+        /* still on translated preview values (covers AE lock too) — see
+         * still_exposure_from() */
+        ctrls.set(controls::AeEnable, false);
+        ctrls.set(controls::ExposureTime, g_still_exp_ovr.load());
+        ctrls.set(controls::AnalogueGain, g_still_gain_ovr.load());
+    } else if (g_ae_locked.load()) {
         ctrls.set(controls::AeEnable, false);
         ctrls.set(controls::ExposureTime, g_ae_lock_exp.load());
         ctrls.set(controls::AnalogueGain, g_ae_lock_gain.load());
@@ -782,6 +1083,36 @@ static void do_capture(std::unique_ptr<CameraConfiguration> &previewCfg,
     g_af_state.store(0);
     g_still_take.store(af_ready);
     g_af_trig.store(!af_ready);
+    /* Manual still via still_exposure_from() — the same transform the HUD
+     * readout displays, so the shot matches the numbers on screen. Applies to
+     * the AE-locked case too (locked values are preview-mode values and need
+     * the same mode-ratio translation). */
+    g_still_exp_ovr.store(0);
+    {
+        int32_t pexp; float pgain;
+        if (g_ae_locked.load()) {
+            pexp = g_ae_lock_exp.load(); pgain = g_ae_lock_gain.load();
+        } else {
+            std::lock_guard<std::mutex> lk(g_frame_mtx);
+            pexp = g_meta_exp; pgain = g_meta_gain;
+        }
+        if (pexp > 0 && pgain > 0) {
+            int32_t e2; float g2;
+            still_exposure_from(pexp, pgain, e2, g2);
+            g_still_exp_ovr.store(e2);
+            g_still_gain_ovr.store(g2);
+        }
+    }
+    {   /* diagnostics: preview brightness at press, to compare with the still */
+        std::lock_guard<std::mutex> lk(g_frame_mtx);
+        uint64_t sum = 0; unsigned n = 0;
+        for (size_t i = 0; i + 2 < (size_t)FH * FSTRIDE; i += 997 * 3) {   /* ~stride-blind sample */
+            sum += g_frame_copy[i] + g_frame_copy[i+1] + g_frame_copy[i+2]; n += 3;
+        }
+        if (n) printf("optocam: PREVMEAN=%llu (exp=%d ag=%.2f)\n",
+                      (unsigned long long)(sum / n), g_meta_exp, g_meta_gain);
+        fflush(stdout);
+    }
     if (setup_stream(stillCfg.get(), false)) {
         if (!af_ready) {
             double af_t0 = now_s();
@@ -810,6 +1141,14 @@ static void do_capture(std::unique_ptr<CameraConfiguration> &previewCfg,
                                           * same structure as the Python app */
             copy = new (std::nothrow) uint8_t[(size_t)h * st];
             if (copy) memcpy(copy, frame, (size_t)h * st);
+            if (copy) {   /* diagnostics: still brightness vs PREVMEAN above */
+                uint64_t sum = 0; unsigned n = 0;
+                for (size_t i = 0; i + 2 < (size_t)h * st; i += 9973 * 3) {
+                    sum += copy[i] + copy[i+1] + copy[i+2]; n += 3;
+                }
+                if (n) printf("optocam: STILLMEAN=%llu\n", (unsigned long long)(sum / n));
+                fflush(stdout);
+            }
         } else printf("optocam: still capture timed out\n");
         g_streaming.store(false);
         camera->stop();
@@ -823,7 +1162,7 @@ static void do_capture(std::unique_ptr<CameraConfiguration> &previewCfg,
                 for (size_t i = 0; i < (size_t)h * st; i += 3) std::swap(copy[i], copy[i + 2]);
                 wb_apply(copy, (size_t)h * (st / 3), false);
                 filter_apply(copy, (size_t)h * (st / 3), fidx);
-                grain_apply(copy, st / 3, h, GRAIN[fidx]);
+                grain_apply(copy, st / 3, h, fidx >= CUSTOM_BASE ? g_custom_grain[fidx - CUSTOM_BASE] : GRAIN[fidx]);
                 save_jpeg(copy, w, h, st, num);
                 delete[] copy;
                 g_saving.fetch_sub(1);
@@ -831,6 +1170,7 @@ static void do_capture(std::unique_ptr<CameraConfiguration> &previewCfg,
         }
     }
     g_mode.store(0);
+    g_still_exp_ovr.store(0);                      /* preview resumes on AE */
     setup_stream(previewCfg.get(), true);          /* back to live preview */
     logstep("capture: preview live again");
 }
@@ -892,7 +1232,15 @@ static void gif_grab_frame(const uint8_t *src, unsigned stride, uint8_t *dst, in
 }
 static void record_gif(std::unique_ptr<CameraConfiguration> &previewCfg,
                        std::unique_ptr<CameraConfiguration> &gifCfg) {
-    const int GIF_FRAMES = 10; const double GIF_IV = 0.5;
+    /* frame count + inter-frame interval, overridable by the hotspot "GIF
+     * Recording" panel via /data/.gifcfg ("FRAMES INTERVAL"). Bounds keep a bad
+     * file from producing a 0-frame or minutes-long recording. */
+    int GIF_FRAMES = 10; double GIF_IV = 0.5;
+    { FILE *gc = fopen("/data/.gifcfg", "r");
+      if (gc) { int fr; float iv;
+          if (fscanf(gc, "%d %f", &fr, &iv) == 2 &&
+              fr >= 2 && fr <= 60 && iv >= 0.1f && iv <= 5.0f) { GIF_FRAMES = fr; GIF_IV = iv; }
+          fclose(gc); } }
     int fidx = g_filter_idx.load();
     g_streaming.store(false);
     g_ae_locked.store(false);
@@ -907,6 +1255,7 @@ static void record_gif(std::unique_ptr<CameraConfiguration> &previewCfg,
     static std::vector<uint8_t> local(sizeof g_frame_copy);
     int32_t local_exp = 0; float local_gain = 0;
     uint8_t bprev = buttons_read();
+    char first_lbl[12]; snprintf(first_lbl, sizeof first_lbl, "1/%d", GIF_FRAMES);  /* pre-roll counter */
 
     auto live_view = [&](const char *lbl) {            /* rotate+scale+filter+overlay */
         double nw = now_s();
@@ -950,7 +1299,7 @@ static void record_gif(std::unique_ptr<CameraConfiguration> &previewCfg,
     double preroll_end = now_s() + 0.3;                /* pre-roll on "1/10" */
     while (now_s() < preroll_end && !cancelled) {
         check_cancel();
-        if (pump()) live_view("1/10");
+        if (pump()) live_view(first_lbl);
         usleep(10000);
     }
     if (!cancelled) {
@@ -963,10 +1312,11 @@ static void record_gif(std::unique_ptr<CameraConfiguration> &previewCfg,
         }
         if (lock_exp < 100) lock_exp = 100;
         if (lock_gain < 1.0f) lock_gain = 1.0f;
-        if (lock_gain > GIF_MAX_GAIN) {
-            double scaled_exp = (double)lock_exp * ((double)lock_gain / GIF_MAX_GAIN);
+        float gcap = capture_max_gain();      /* same ISO ceiling as photos */
+        if (lock_gain > gcap) {
+            double scaled_exp = (double)lock_exp * ((double)lock_gain / gcap);
             lock_exp = (int32_t)std::min<double>(GIF_MAX_EXP_US, scaled_exp);
-            lock_gain = GIF_MAX_GAIN;
+            lock_gain = gcap;
         }
         g_ae_lock_exp.store(lock_exp);
         g_ae_lock_gain.store(lock_gain);
@@ -983,7 +1333,7 @@ static void record_gif(std::unique_ptr<CameraConfiguration> &previewCfg,
                 int32_t etol = std::max<int32_t>(200, lock_exp / 20);
                 float gtol = std::max(0.05f, lock_gain * 0.05f);
                 locked_frames = (ed <= etol && gd <= gtol) ? locked_frames + 1 : 0;
-                live_view("1/10");
+                live_view(first_lbl);
             }
             usleep(10000);
         }
@@ -991,7 +1341,10 @@ static void record_gif(std::unique_ptr<CameraConfiguration> &previewCfg,
     double rec_start = now_s();
     for (int i = 0; i < GIF_FRAMES && !cancelled; i++) {
         double target = rec_start + i * GIF_IV;
-        char lbl[8]; snprintf(lbl, sizeof lbl, "%d/10", i + 1);
+        /* counter = frames captured so far, so each number holds for one full
+         * interval. (Python showed the upcoming frame — at long intervals that
+         * made 1→2 flip instantly while every later step took an interval.) */
+        char lbl[12]; snprintf(lbl, sizeof lbl, "%d/%d", std::max(i, 1), GIF_FRAMES);
         while (!cancelled) {
             check_cancel();
             bool got = pump();
@@ -1005,6 +1358,14 @@ static void record_gif(std::unique_ptr<CameraConfiguration> &previewCfg,
             gif_grab_frame(local.data(), FSTRIDE, frames.back().data(), fidx);
         }
     }
+    if (!cancelled) {                                  /* let the counter land on N/N */
+        char lbl[12]; snprintf(lbl, sizeof lbl, "%d/%d", GIF_FRAMES, GIF_FRAMES);
+        double hold_end = now_s() + 0.35;
+        while (now_s() < hold_end) {
+            if (pump()) live_view(lbl);
+            usleep(10000);
+        }
+    }
     g_streaming.store(false);
     g_ae_locked.store(false);
     g_ctrl_dirty.store(true);
@@ -1013,7 +1374,7 @@ static void record_gif(std::unique_ptr<CameraConfiguration> &previewCfg,
     if (!cancelled && !frames.empty()) {
         int num = next_photo_number();
         g_saving.fetch_add(1);
-        std::thread([fr = std::move(frames), num] {
+        std::thread([fr = std::move(frames), num, iv_ms = (int)(GIF_IV * 1000 + 0.5)] {
             char path[64], tmp[64];
             snprintf(path, sizeof path, "/data/photos/Optocamzero_%d.gif", num);
             snprintf(tmp, sizeof tmp, "/data/photos/.tmp_%d.gif", num);
@@ -1027,7 +1388,7 @@ static void record_gif(std::unique_ptr<CameraConfiguration> &previewCfg,
             }
             /* write to a temp name, rename when complete — a power cut mid-
              * encode can never leave a truncated file at the final name */
-            gif_write(tmp, 640, 640, pal, qf, 500);
+            gif_write(tmp, 640, 640, pal, qf, iv_ms);
             struct stat st_;
             if (stat(tmp, &st_) == 0 && st_.st_size < 1000) unlink(tmp);
             else {
@@ -1159,10 +1520,13 @@ static std::mutex g_gif_mtx;
 static std::atomic<int> g_gif_token(0);
 static std::string g_gifanim_file;
 static int g_gifanim_idx = 0; static double g_gifanim_last = 0;
+static double g_gifanim_iv = 0.5;   /* frame delay from the file's own GCE */
 static void gif_frames_build(const std::string &path, int index, int total, int token, int upto);
 static void gif_gallery_load(const std::string &path, int index, int total) {
     { std::lock_guard<std::mutex> gk(g_gif_mtx); g_gifanim.clear(); }
     g_gifanim_file = path; g_gifanim_idx = 0; g_gifanim_last = now_s();
+    int dly = gif_first_delay_ms(path.c_str());
+    g_gifanim_iv = dly >= 20 ? dly / 1000.0 : 0.5;
     int token = g_gif_token.fetch_add(1) + 1;
     static std::atomic<bool> busy(false);
     std::thread([path, index, total, token] {            /* rest in background */
@@ -1297,17 +1661,36 @@ static void render_gallery_frame(Img img, int index, int total, bool confirm) {
         int c0,c1,c2,c3;
         g_te.textbbox(f25, "Delete?", c0,c1,c2,c3);
         g_te.draw(img, f25, (240-(c2-c0))/2, 76, "Delete?", 255,255,255);
-        g_te.textbbox(f25, "YES: ", c0,c1,c2,c3);
-        int tw = c2-c0, th = c3-c1, bx = (240-tw-14)/2, by = 114;
-        g_te.draw(img, f25, bx, by, "YES: ", 255,255,255);
-        int ax = bx + tw, mid = by + (c1+c3)/2;
-        draw_polygon_fill(img, {{(float)ax+7,(float)mid-8},{(float)ax,(float)mid+6},{(float)ax+14,(float)mid+6}}, 255,255,255,255);
-        g_te.textbbox(f25, "NO: Any Button", c0,c1,c2,c3);
-        g_te.draw(img, f25, (240-(c2-c0))/2, by+th+10, "NO: Any Button", 180,180,180);
+        /* Colon gap = 80% of a space advance, shared by both rows so the
+         * "YES:"->arrow gap matches the "NO:"->"Any Button" gap. */
+        int s0,s1,s2,s3, e0,e1,e2,e3;
+        g_te.textbbox(f25, "N N", s0,s1,s2,s3);
+        g_te.textbbox(f25, "NN",  e0,e1,e2,e3);
+        int gap = (int)std::lround(0.8 * ((s2-s0) - (e2-e0)));
+        const int AW = 19, AH = 11;                       /* arrow width / height */
+        g_te.textbbox(f25, "YES:", c0,c1,c2,c3);
+        int tw = c2-c0, th = c3-c1;
+        int total = tw + gap + AW, bx = (240-total)/2, by = 114;
+        g_te.draw(img, f25, bx, by, "YES:", 255,255,255);
+        int mid = by + (c1+c3)/2 - 1;                     /* text centre; arrow nudged up 1px */
+        /* Up-chevron (matches the hotspot web UI's stroked arrows): anti-aliased
+         * round-capped strokes, centred on the text. */
+        float lx = (float)(bx + tw + gap);
+        float apx = lx + AW/2.0f, topy = (float)mid - AH/2.0f, boty = (float)mid + AH/2.0f;
+        draw_line_aa(img, lx,      boty, apx, topy, 2.4f, 255,255,255,255);
+        draw_line_aa(img, lx + AW, boty, apx, topy, 2.4f, 255,255,255,255);
+        /* "NO:" + "Any Button" drawn as two pieces so the colon gap matches. */
+        int n0,n1,n2,n3, y0,y1,y2,y3;
+        g_te.textbbox(f25, "NO:", n0,n1,n2,n3);
+        g_te.textbbox(f25, "Any Button", y0,y1,y2,y3);
+        int wNO = n2-n0, wAny = y2-y0, ntot = wNO + gap + wAny;
+        int nx = (240-ntot)/2, ny = by+th+10;
+        g_te.draw(img, f25, nx, ny, "NO:", 180,180,180);
+        g_te.draw(img, f25, nx + wNO + gap, ny, "Any Button", 180,180,180);
     }
     img_to_display(img);
 }
-static void render_gif_thumb_frame(Img img, int index, int total) {
+static void render_gif_thumb_frame(Img img, int index, int total, int nframes) {
     Font *f25 = g_te.font(25);
     Font *f22 = g_te.font(22);
     std::lock_guard<std::mutex> rk(g_render_mtx);
@@ -1324,7 +1707,7 @@ static void render_gif_thumb_frame(Img img, int index, int total) {
     alpha_composite(img, cached_shadow("gifpos", pos, 25, px, py));
     g_te.draw(img, f25, px, py, pos, 255,255,255);
 
-    const char *fc = "1/10";
+    char fc[16]; snprintf(fc, sizeof fc, "1/%d", nframes > 0 ? nframes : 10);
     g_te.textbbox(f22, fc, b0,b1,b2,b3);
     int fx = 240 - 15 - b2, fy = 15 - b1;
     g_te.draw(img, f22, fx+1, fy+1, fc, 60,60,60);
@@ -1387,7 +1770,7 @@ static void display_gallery_image(const std::string &path, int index, int total,
     if (is_gif && !confirm) {
         gif_gallery_load(path, index, total);
         if (gif_thumb_load_240(path.c_str(), img)) {
-            render_gif_thumb_frame(img, index, total);
+            render_gif_thumb_frame(img, index, total, gif_frame_count(path.c_str()));
             return;
         }
         std::lock_guard<std::mutex> gk(g_gif_mtx);
@@ -1420,6 +1803,57 @@ static int transfer_station_count() {
     pclose(pp);
     return n;
 }
+
+/* ---- live view (transfer mode only): the hotspot Filter Maker's LIVE tab.
+ * The web heartbeats /data/.live_active (like .calib_active); while it's
+ * fresh the camera runs the 640x640 GIF stream — the one square mode above
+ * preview size, and g_frame_copy is already sized for it — and unfiltered
+ * WB-applied frames are JPEG-encoded into tmpfs for the server to poll.
+ * The browser applies the filter itself (its preview math mirrors the
+ * firmware), so slider moves cost nothing over the wire. */
+#define LIVE_FLAG "/data/.live_active"
+#define LIVE_JPG  "/run/optocam-live.jpg"
+static bool live_flag_fresh(void) {
+    struct stat st;
+    if (stat(LIVE_FLAG, &st) != 0) return false;
+    long age = (long)(time(NULL) - st.st_mtime);
+    if (age >= 0 && age < 5) return true; /* negative = clock skew -> stale */
+    unlink(LIVE_FLAG);                    /* phone gone without /live-close */
+    return false;
+}
+/* Same 90° rotation + channel order as save_jpeg, but tmpfs + atomic rename
+ * and no fsync (nothing to persist). q85: ~60-90KB per 640px frame. */
+static void write_live_jpeg(const uint8_t *rgb, unsigned W, unsigned H, unsigned stride) {
+    const char *tmp = LIVE_JPG ".tmp";
+    FILE *f = fopen(tmp, "wb");
+    if (!f) return;
+    struct jpeg_compress_struct ci; struct jpeg_error_mgr jerr;
+    ci.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&ci);
+    jpeg_stdio_dest(&ci, f);
+    ci.image_width = H; ci.image_height = W;      /* rotated: WxH swap */
+    ci.input_components = 3; ci.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&ci);
+    jpeg_set_quality(&ci, 85, TRUE);
+    jpeg_start_compress(&ci, TRUE);
+    std::vector<uint8_t> row(H * 3);
+    while (ci.next_scanline < ci.image_height) {
+        unsigned y = ci.next_scanline;
+        unsigned scol = W - 1 - y;                /* out(x,y) = src(row=x, col=W-1-y) */
+        for (unsigned x = 0; x < H; x++) {
+            const uint8_t *px = rgb + (size_t)x * stride + (size_t)scol * 3;
+            /* preview/GIF stream is BGR (unlike the still stream save_jpeg
+             * gets) — swap into the JPEG's RGB */
+            row[x*3] = px[2]; row[x*3+1] = px[1]; row[x*3+2] = px[0];
+        }
+        JSAMPROW rp = row.data();
+    jpeg_write_scanlines(&ci, &rp, 1);
+    }
+    jpeg_finish_compress(&ci);
+    jpeg_destroy_compress(&ci);
+    fclose(f);
+    rename(tmp, LIVE_JPG);
+}
 static void draw_aa_dot(Img &img, int cx, int cy, float radius,
                         uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     int lx = (int)std::floor(cx - radius - 1), hx = (int)std::ceil(cx + radius + 1);
@@ -1431,10 +1865,34 @@ static void draw_aa_dot(Img &img, int cx, int cy, float radius,
             if (cov > 0.0f) set_px(img, x, y, r, g, b, (uint8_t)(a * cov));
         }
 }
+/* Hotspot-screen palette, mirrors the web theme in /data/.theme so the on-device
+ * transfer screen matches the phone UI. Re-read each 0.5s refresh, so changing
+ * the theme on the phone recolours the LCD within half a second. */
+struct TScol { uint8_t bg[3], title[3], label[3], value[3], accent[3], divider[3], hint[3]; };
+static TScol transfer_theme() {
+    TScol c = {{0,0,0},{160,160,160},{100,100,100},{255,255,255},
+               {60,200,80},{40,40,40},{60,60,60}};              /* dark (default) */
+    FILE *f = fopen("/data/.theme", "r");
+    if (f) {
+        char b[16] = {0};
+        if (fscanf(f, "%15s", b) == 1) {
+            if (!strcmp(b, "light"))
+                c = {{244,242,234},{90,88,82},{132,127,116},{22,20,17},
+                     {58,148,72},{206,201,190},{160,155,144}};
+            else if (!strcmp(b, "yellow"))
+                c = {{255,217,59},{70,60,0},{112,96,0},{20,18,4},
+                     {0,153,102},{203,169,28},{124,106,0}};
+        }
+        fclose(f);
+    }
+    return c;
+}
 static void show_transfer_screen(int stations) {
+    TScol c = transfer_theme();
     Img img(240, 240);
-    for (auto &px : img.px) px = 0;                     /* opaque black */
-    for (size_t i = 3; i < img.px.size(); i += 4) img.px[i] = 255;
+    for (size_t i = 0; i + 3 < img.px.size(); i += 4) {
+        img.px[i] = c.bg[0]; img.px[i+1] = c.bg[1]; img.px[i+2] = c.bg[2]; img.px[i+3] = 255;
+    }
     std::lock_guard<std::mutex> rk(g_render_mtx);
     Font *f17 = g_te.font(17), *f16 = g_te.font(16), *f20 = g_te.font(20), *f18 = g_te.font(18);
     double now = now_s();
@@ -1443,30 +1901,30 @@ static void show_transfer_screen(int stations) {
 
     int b0,b1,b2,b3;
     g_te.textbbox(f17, "Transfer Mode", b0,b1,b2,b3);
-    g_te.draw(img, f17, 20, 13, "Transfer Mode", 160,160,160);
+    g_te.draw(img, f17, 20, 13, "Transfer Mode", c.title[0],c.title[1],c.title[2]);
     int dot_cy = 13 + (b1 + b3) / 2, dot_cx = 214, dot_r = 6;
     if (dot_visible) {
-        uint8_t dr = connected ? 60 : 90, dg = connected ? 200 : 90, db = connected ? 80 : 90;
-        draw_aa_dot(img, dot_cx, dot_cy, dot_r, dr, dg, db, 255);
+        const uint8_t *d = connected ? c.accent : c.label;
+        draw_aa_dot(img, dot_cx, dot_cy, dot_r, d[0], d[1], d[2], 255);
     }
     if (connected) {                                    /* count left of the dot */
         char cnt[8]; snprintf(cnt, sizeof cnt, "%d", stations);
         int c0,c1,c2,c3; g_te.textbbox(f17, cnt, c0,c1,c2,c3);
         int cx = dot_cx - dot_r - (c2-c0) - 8;
         int cy = dot_cy - (c3-c1)/2 - c1;
-        g_te.draw(img, f17, cx, cy, cnt, 60,200,80);
+        g_te.draw(img, f17, cx, cy, cnt, c.accent[0],c.accent[1],c.accent[2]);
     }
-    draw_line(img, 0, 43, 239, 43, 1, 40,40,40,255);
-    g_te.draw(img, f16, 20, 51,  "WiFi",         100,100,100);
-    g_te.draw(img, f20, 20, 69,  "Optocam Zero", 255,255,255);
-    g_te.draw(img, f16, 20, 99,  "Password",     100,100,100);
-    g_te.draw(img, f20, 20, 117, "0026opto",     255,255,255);
-    g_te.draw(img, f16, 20, 147, "Browser",      100,100,100);
-    g_te.draw(img, f20, 20, 165, "192.168.4.1",  255,255,255);
-    draw_line(img, 0, 197, 239, 197, 1, 40,40,40,255);
+    draw_line(img, 0, 43, 239, 43, 1, c.divider[0],c.divider[1],c.divider[2],255);
+    g_te.draw(img, f16, 20, 51,  "WiFi",         c.label[0],c.label[1],c.label[2]);
+    g_te.draw(img, f20, 20, 69,  "Optocam Zero", c.value[0],c.value[1],c.value[2]);
+    g_te.draw(img, f16, 20, 99,  "Password",     c.label[0],c.label[1],c.label[2]);
+    g_te.draw(img, f20, 20, 117, "0026opto",     c.value[0],c.value[1],c.value[2]);
+    g_te.draw(img, f16, 20, 147, "Browser",      c.label[0],c.label[1],c.label[2]);
+    g_te.draw(img, f20, 20, 165, "192.168.4.1",  c.value[0],c.value[1],c.value[2]);
+    draw_line(img, 0, 197, 239, 197, 1, c.divider[0],c.divider[1],c.divider[2],255);
     g_te.textbbox(f18, "Hold center to exit", b0,b1,b2,b3);
     int hint_y = 197 + (43 - (b3-b1)) / 2 - b1;
-    g_te.draw(img, f18, (240-(b2-b0))/2, hint_y, "Hold center to exit", 60,60,60);
+    g_te.draw(img, f18, (240-(b2-b0))/2, hint_y, "Hold center to exit", c.hint[0],c.hint[1],c.hint[2]);
     img_to_display(img);
 }
 
@@ -1497,32 +1955,70 @@ static void bl_trace(const char *ev) {
 }
 static void set_backlight(bool on) {
     bl_trace(on ? "set_backlight ON" : "set_backlight OFF");
-    g_bl_mode.store(on ? 1 : 0); gpio_set(bl_fd, on ? 1 : 0);
+    g_bl_mode.store(on ? 1 : 0); bl_set(on ? 1 : 0);
 }
 static void backlight_dim() { bl_trace("dim"); g_bl_mode.store(2); }
-static void backlight_pwm_thread() {                 /* soft-PWM only while dimmed */
-    /* real-time priority + absolute deadlines: scheduling jitter on a busy
-     * CPU is what made the dimmed backlight visibly flicker */
-    struct sched_param sp_; sp_.sched_priority = 50;
+/* Effective backlight duty for the current mode: off 0, dim 8 (the shipped
+ * idle-dim level), on = the calibrated screen brightness (255 = solid DC). */
+static inline int bl_duty(void) {
+    int m = g_bl_mode.load();
+    return m == 0 ? 0 : m == 2 ? 8 : g_bl_level.load();
+}
+static void backlight_pwm_thread() {          /* soft-PWM whenever duty < 255 */
+    /* Brightness = pulse WIDTH / period, and at the dim duty the pulse is only
+     * 63µs — so scheduler wakeup latency (WiFi IRQs, the hotspot's python
+     * server) used to stretch or clip it into visible brightness wander.
+     * Strategy: absolute-deadline sleeps set each pulse's START (lateness only
+     * shifts the pulse inside its period — invisible), and a short busy-spin
+     * times the pulse's END, making the width exact on every cycle. Spin cost
+     * is ≤150µs per 2ms cycle, and only while duty < 255 (dim / calibrated
+     * backlight); the factory backlight is solid DC and costs nothing. */
+    struct sched_param sp_; sp_.sched_priority = 80;
     pthread_setschedparam(pthread_self(), SCHED_FIFO, &sp_);
+    const long PERIOD_NS = 2000000;           /* 500Hz, same as the original dim */
+    /* Spin budget = worst wakeup lateness the pulse width can absorb. 150µs
+     * was enough for an idle system but live-view JPEG encoding delays even a
+     * FIFO thread by more — at the calib panel's mid duties that leaked into
+     * pulse width as ~10Hz brightness pulsing (the encode rhythm). 400µs
+     * covers it; cost is a sub-ms spin per 2ms cycle, and only while duty <
+     * 255 (factory backlight is solid DC and never enters this path). */
+    const long SPIN_NS   = 400000;
+    auto ns_between = [](const struct timespec &a, const struct timespec &b) {
+        return (b.tv_sec - a.tv_sec) * 1000000000L + (b.tv_nsec - a.tv_nsec); };
+    auto add_ns = [](struct timespec &ts, long ns) {
+        ts.tv_nsec += ns;
+        while (ts.tv_nsec >= 1000000000) { ts.tv_nsec -= 1000000000; ts.tv_sec++; } };
     struct timespec t;
     clock_gettime(CLOCK_MONOTONIC, &t);
     for (;;) {
-        if (g_bl_mode.load() == 2) {
-            gpio_set(bl_fd, 1);
-            t.tv_nsec += 63000;                       /* 63us on */
-            if (t.tv_nsec >= 1000000000) { t.tv_nsec -= 1000000000; t.tv_sec++; }
-            clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, nullptr);
-            if (g_bl_mode.load() == 2) gpio_set(bl_fd, 0);
-            t.tv_nsec += 1937000;                     /* 1937us off = 8/255 @500Hz */
-            if (t.tv_nsec >= 1000000000) { t.tv_nsec -= 1000000000; t.tv_sec++; }
+        int duty = bl_duty();
+        if (duty > 0 && duty < 255) {
+            /* stalled past a whole period: drop the missed cycles and resync —
+             * racing to catch up would burst back-to-back pulses (a flash) */
+            struct timespec nw; clock_gettime(CLOCK_MONOTONIC, &nw);
+            if (ns_between(t, nw) > PERIOD_NS) t = nw;
+            long on_ns = PERIOD_NS / 255 * duty;
+            struct timespec s0; clock_gettime(CLOCK_MONOTONIC, &s0);
+            bl_set(1);
+            if (on_ns > SPIN_NS) {            /* long pulse: sleep the bulk... */
+                struct timespec ps = s0; add_ns(ps, on_ns - SPIN_NS);
+                clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ps, nullptr);
+            }
+            for (;;) {                        /* ...and spin the tail: exact width */
+                struct timespec s1; clock_gettime(CLOCK_MONOTONIC, &s1);
+                if (ns_between(s0, s1) >= on_ns) break;
+            }
+            int d2 = bl_duty();               /* mode may have flipped mid-cycle */
+            if (d2 > 0 && d2 < 255) bl_set(0);
+            else bl_set(d2 ? 1 : 0);
+            add_ns(t, PERIOD_NS);             /* sleep out the period */
             clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &t, nullptr);
         } else {
             /* re-assert the level every tick: a wake press racing our
              * mode-check/gpio_set pair could leave the pin low with mode=1
              * (screen black, app alive — read as a "crash"); this heals any
              * lost update within 20ms */
-            gpio_set(bl_fd, g_bl_mode.load() == 1 ? 1 : 0);
+            bl_set(duty ? 1 : 0);
             usleep(20000); clock_gettime(CLOCK_MONOTONIC, &t);
         }
     }
@@ -1625,7 +2121,9 @@ int main() {
         saving_spinner_sprite(0);
         TextEngine te;
         if (!te.init("/usr/share/optocam/cmunvt.ttf")) return;
-        for (int i = 0; i < 9; i++) {
+        /* presets only: /data may not be mounted yet, so customs (>= CUSTOM_BASE)
+         * are built lazily by filter_indicator() when first shown */
+        for (int i = 0; i < CUSTOM_BASE; i++) {
             Img s = build_filter_indicator(FILTERS[i], te);
             std::lock_guard<std::mutex> rk(g_render_mtx);
             if (!g_filt_ind_cache.count(i)) g_filt_ind_cache.emplace(i, std::move(s));
@@ -1660,6 +2158,9 @@ int main() {
         data_ready();
         build_565_luts();          /* /data/.dispcal wasn't readable at start */
         build_wb_trim();           /* same for /data/.wbtrim */
+        build_custom_filters();    /* /data/.effect0-4 — the custom filters */
+        load_startup_defaults();   /* /data/.defaults — startup filter + WB */
+        load_ae_limits();          /* /data/.aelimits — min shutter / max ISO */
         warm_initial_gallery_cache();
     }).detach();
 
@@ -1670,6 +2171,7 @@ int main() {
     int gal_idx = 0; bool gal_confirm = false, gal_dirty = false;
     bool gif_mode = false;
     double gif_label_time = 0, empty_msg_time = 0, nospace_msg_time = 0;
+    bl_fast_init();
     std::thread(backlight_pwm_thread).detach();
     double idle_last = now_s(); bool idle_dimmed = false;
     uint8_t prev = 0;
@@ -1681,10 +2183,23 @@ int main() {
     double left_held = 0, right_held = 0, last_scroll = 0;
     const double DEB = 0.3, CAP_LONG = 0.6, HOLD_TH = 0.35, FAST_IV = 0.10;
 
+    bool live_running = false;      /* transfer-mode live view holds the camera on the GIF stream */
     auto stop_cam = [&] { if (camera_running) { g_streaming.store(false); camera->stop(); camera_running = false; } };
     auto start_cam = [&] { if (!camera_running) { g_ctrl_dirty.store(true); setup_stream(previewCfg.get(), true); camera_running = true; } };
+    auto stop_live = [&] {
+        if (!live_running) return;
+        stop_cam(); live_running = false;
+        g_live_neutral.store(false);
+        g_ctrl_dirty.store(true);       /* restore the active filter's ISP next stream */
+        unlink(LIVE_JPG);           /* never serve a frozen last frame */
+    };
     auto enter_transfer = [&](int &m) {
         m = M_TRANSFER;
+        /* session flags from a previous boot are never valid — with no RTC the
+         * restored clock can sit BEHIND their mtime, which made the 8s stale
+         * check read them as "fresh" and show a ghost calibration pattern */
+        unlink("/data/.calib_active"); unlink("/data/.calib");
+        unlink("/data/.calib_img");    unlink(LIVE_FLAG);
         transfer_last_refresh = 0; transfer_last_activity = now_s();
         set_backlight(true);
         show_transfer_screen(0);                         /* draw before camera->stop(), which can take seconds */
@@ -1693,6 +2208,26 @@ int main() {
     };
     auto exit_transfer = [&](int &m) {
         system("/usr/share/optocam/transfer-stop.sh >/dev/null 2>&1 &");
+        /* live view holds the camera on the 640px GIF config — release it so
+         * start_cam below reconfigures for the 240px preview. */
+        stop_live();
+        unlink(LIVE_FLAG);
+        /* drop any in-progress screen calibration and restore the saved profile
+         * so the returning live preview renders with the persisted white point. */
+        unlink("/data/.calib_active");
+        unlink("/data/.calib");
+        unlink("/data/.calib_img");
+        build_565_luts();
+        build_custom_filters();    /* pick up filters created/renamed/deleted in the hotspot UI */
+        {   /* names/count may have changed: stale custom pills + an index past
+             * the new end are both possible. Camera is stopped, but the render
+             * mutex still guards the sprite cache against the warm thread. */
+            std::lock_guard<std::mutex> rk(g_render_mtx);
+            drop_custom_filter_sprites();
+        }
+        if (g_filter_idx.load() >= filter_count()) g_filter_idx.store(0);
+        load_ae_limits();          /* min shutter / max ISO may have changed in the UI */
+        g_ctrl_dirty.store(true);  /* re-apply the (possibly changed) custom ISP */
         m = M_PREVIEW; set_backlight(true); start_cam();
     };
 
@@ -1742,13 +2277,115 @@ int main() {
                 prev = buttons_read();
                 usleep(50000); continue;
             } else if (!tj) joy_was_down = false;
+
+            /* ---- live view: run the camera while the phone keeps the flag
+             * fresh, export ~10fps unfiltered JPEGs for the Filter Maker's
+             * LIVE tab. Placed before the calibration branch (it continues). */
+            {
+                static double next_live_try = 0;
+                static double next_live_enc = 0;
+                static uint64_t live_last_seq = 0;
+                bool lv = live_flag_fresh();
+                if (lv && !live_running && bnow >= next_live_try) {
+                    g_live_neutral.store(true);
+                    g_ctrl_dirty.store(true);            /* neutral ISP + AE limits on the live stream */
+                    if (setup_stream(gifCfg.get(), true)) {
+                        camera_running = true; live_running = true;
+                        live_last_seq = g_frame_seq.load();
+                    } else {
+                        g_live_neutral.store(false);
+                        next_live_try = bnow + 2.0;      /* don't thrash a failing start */
+                    }
+                } else if (!lv && live_running) {
+                    stop_live();
+                }
+                if (live_running) {
+                    uint64_t seq = g_frame_seq.load();
+                    if (seq != live_last_seq && bnow >= next_live_enc) {
+                        live_last_seq = seq;
+                        next_live_enc = bnow + 0.1;
+                        static std::vector<uint8_t> lvbuf(sizeof g_frame_copy);
+                        {
+                            std::lock_guard<std::mutex> lk(g_frame_mtx);
+                            memcpy(lvbuf.data(), g_frame_copy, sizeof g_frame_copy);
+                        }
+                        g_frame_wanted.store(true);
+                        /* WB like the still/preview paths, so the browser's
+                         * filtered live view matches what a capture would get */
+                        wb_apply(lvbuf.data(), (size_t)FH * (FSTRIDE / 3), true);
+                        write_live_jpeg(lvbuf.data(), FW, FH, FSTRIDE);
+                    }
+                }
+            }
+
+            /* ---- live screen calibration: the hotspot Screen-Calibration panel
+             * touches /data/.calib_active and streams "GR GG GB SAT GAMMA CONTRAST"
+             * into /data/.calib as the sliders move (plus /data/.calib_img for
+             * the reference-pattern choice). Show the chosen pattern and rebuild
+             * the LUTs in place so changes appear on the panel in real time.
+             * Everything here is transfer-mode only. */
+            static bool was_calib = false;
+            static float lr = -9, lg = -9, lb = -9, ls = -9, lga = -9, lct = -9, lbl = -9;
+            static char cur_img[16] = {0};
+            static uint8_t calimg[240*240*3]; static bool img_loaded = false;
+            static bool drawn = false;
+            /* Calibration is active only while the phone keeps the flag fresh
+             * (the web heartbeats it ~every second). A stale flag — phone closed
+             * the tab or dropped WiFi without a clean /calib-close — expires
+             * after 8s so the LCD returns to the hotspot screen on its own. */
+            bool calib = false;
+            { struct stat cst;
+              if (stat("/data/.calib_active", &cst) == 0) {
+                  long age = (long)(time(NULL) - cst.st_mtime);      /* wall clock, matches mtime */
+                  if (age >= 0 && age < 8) calib = true;             /* negative = clock skew -> stale */
+                  else { unlink("/data/.calib_active"); unlink("/data/.calib"); unlink("/data/.calib_img"); }
+              } }
+            if (was_calib && !calib) {                 /* panel closed calibration */
+                build_565_luts();                      /* restore saved/baked profile */
+                transfer_last_refresh = 0;             /* force a transfer-screen redraw */
+            }
+            bool just_entered = calib && !was_calib;
+            was_calib = calib;
+            if (calib) {
+                if (just_entered) { drawn = false; lr = lg = lb = ls = lga = lct = lbl = -9; cur_img[0] = 0; }
+                transfer_last_activity = bnow;         /* phone drives it — don't idle-dim */
+                if (idle_dimmed) { idle_dimmed = false; set_backlight(true); }
+                /* joystick left/right cycles the reference pattern (mirrors the
+                 * web selector); the write is picked up by read_calib_img_name below */
+                const char *base_img = cur_img[0] ? cur_img : "color";
+                if (pressed & (1 << JOY_RIGHT)) cycle_calib_img(base_img, +1);
+                else if (pressed & (1 << JOY_LEFT)) cycle_calib_img(base_img, -1);
+                char want_img[16]; read_calib_img_name(want_img, sizeof want_img);
+                if (strcmp(want_img, cur_img) != 0) {  /* pattern selection changed */
+                    img_loaded = load_calib_image(calimg, want_img);
+                    snprintf(cur_img, sizeof cur_img, "%s", want_img);
+                    drawn = false;
+                }
+                float r = 1, g = 1, b = 1, s = 1, ga = 1, ct = BASE_CONTRAST, bl = 1;
+                if (read_calib_live(r, g, b, s, ga, ct, bl)) {
+                    /* brightness rides the backlight alone — no LUT rebuild and
+                     * no redraw for a bl-only change: the full-frame SPI blit
+                     * stalls the PWM thread into a visible flicker pulse */
+                    if (bl != lbl) { g_bl_level.store((int)lrintf(bl * 255.0f)); lbl = bl; }
+                    if (r != lr || g != lg || b != lb || s != ls || ga != lga || ct != lct) {
+                        build_565_luts_from(r, g, b, s, ga, ct);
+                        lr = r; lg = g; lb = b; ls = s; lga = ga; lct = ct; drawn = false;
+                    }
+                }
+                if (!drawn && img_loaded) { display_blit_240(calimg); drawn = true; }
+                usleep(50000); continue;
+            }
+
             if (cur) {
                 transfer_last_activity = bnow;
                 if (idle_dimmed) { idle_dimmed = false; set_backlight(true); transfer_last_refresh = 0; }
             } else if (!idle_dimmed && bnow - transfer_last_activity > 30.0) {
                 idle_dimmed = true; backlight_dim();
             }
-            if (bnow - transfer_last_refresh >= 0.5) {
+            /* no redraws while dimmed: the content is static and each SPI blit
+             * stalls the backlight PWM into a visible flicker pulse; waking
+             * zeroes transfer_last_refresh so the screen repaints immediately */
+            if (!idle_dimmed && bnow - transfer_last_refresh >= 0.5) {
                 transfer_last_refresh = bnow;
                 show_transfer_screen(transfer_station_count());
             }
@@ -1782,10 +2419,12 @@ int main() {
             static int fps_frames = 0; static double fps_t0 = now_s();
             fps_frames++;
             if (now_s() - fps_t0 >= 5.0) {
-                printf("fps %.1f  awb=%s ct=%dK gains=%.2f/%.2f\n",
+                printf("fps %.1f  awb=%s ct=%dK gains=%.2f/%.2f  exp=%dus ag=%.2f dg=%.2f cap=%lldus\n",
                        fps_frames / (now_s() - fps_t0),
                        AWB_MODES[g_awb_idx.load()].abbr, g_meta_ct.load(),
-                       g_meta_cgr_x100.load()/100.0, g_meta_cgb_x100.load()/100.0);
+                       g_meta_cgr_x100.load()/100.0, g_meta_cgb_x100.load()/100.0,
+                       exp_us, gain, g_meta_dg_x100.load()/100.0,
+                       (long long)g_max_exp_us.load());
                 fflush(stdout);
                 fps_frames = 0; fps_t0 = now_s();
             }
@@ -1884,16 +2523,17 @@ int main() {
                     else { gal_idx = std::min(gal_idx, (int)gallery_files.size() - 1); gal_dirty = true; }
                 } else { gal_confirm = true; gal_dirty = true; }
             } else if (mode == M_PREVIEW) {
-                g_filter_idx.store((g_filter_idx.load() + 8) % 9);
-                g_filter_label_time.store(bnow); g_ctrl_dirty.store(true);
+                int nf = filter_count();
+                g_filter_idx.store((g_filter_idx.load() + nf - 1) % nf);
+                g_filter_label_time.store(bnow); g_ctrl_dirty.store(true); g_user_touched.store(true);
             }
         }
         if ((cur & (1 << JOY_DOWN)) && bnow - last_joy_ud > DEB) {
             last_joy_ud = bnow;
             if (mode == M_GALLERY && gal_confirm) { gal_confirm = false; gal_dirty = true; }
             else if (mode == M_PREVIEW) {
-                g_filter_idx.store((g_filter_idx.load() + 1) % 9);
-                g_filter_label_time.store(bnow); g_ctrl_dirty.store(true);
+                g_filter_idx.store((g_filter_idx.load() + 1) % filter_count());
+                g_filter_label_time.store(bnow); g_ctrl_dirty.store(true); g_user_touched.store(true);
             }
         }
 
@@ -1914,23 +2554,23 @@ int main() {
             if ((cur & (1 << JOY_LEFT)) && bnow - last_lr > DEB) {
                 last_lr = bnow;
                 g_awb_idx.store((g_awb_idx.load() + 4) % 5);
-                g_awb_changed_time.store(bnow); g_ctrl_dirty.store(true);
+                g_awb_changed_time.store(bnow); g_ctrl_dirty.store(true); g_user_touched.store(true);
             }
             if ((cur & (1 << JOY_RIGHT)) && bnow - last_lr > DEB) {
                 last_lr = bnow;
                 g_awb_idx.store((g_awb_idx.load() + 1) % 5);
-                g_awb_changed_time.store(bnow); g_ctrl_dirty.store(true);
+                g_awb_changed_time.store(bnow); g_ctrl_dirty.store(true); g_user_touched.store(true);
             }
         }
 
-        /* ---- gallery redraw + gif animation (500ms/frame) ---- */
+        /* ---- gallery redraw + gif animation (file's own frame delay) ---- */
         if (mode == M_GALLERY && gal_dirty && !gallery_files.empty()) {
             gal_dirty = false;
             display_gallery_image(gallery_files[gal_idx], gal_idx + 1, (int)gallery_files.size(), gal_confirm);
             prefetch_neighbors(gallery_files, gal_idx);
         }
         if (mode == M_GALLERY && !gal_confirm && !gallery_files.empty() &&
-            gallery_files[gal_idx] == g_gifanim_file && bnow - g_gifanim_last >= 0.5) {
+            gallery_files[gal_idx] == g_gifanim_file && bnow - g_gifanim_last >= g_gifanim_iv) {
             std::lock_guard<std::mutex> gk(g_gif_mtx);
             if ((int)g_gifanim.size() > 1) {
                 g_gifanim_last = bnow;

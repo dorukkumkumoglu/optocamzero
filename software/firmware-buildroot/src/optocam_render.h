@@ -300,6 +300,25 @@ inline void draw_line(Img &img, float x0, float y0, float x1, float y1,
             if (d <= width / 2.0f) set_px(img, x, y, r, g, b, a);
         }
 }
+/* Anti-aliased round-capped line: same distance-to-segment as draw_line, but the
+ * edge pixel's alpha is scaled by coverage (via set_px's alpha blend) so the
+ * stroke doesn't stair-step. width is a float so strokes can be sub-pixel. */
+inline void draw_line_aa(Img &img, float x0, float y0, float x1, float y1,
+                         float width, uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
+    float dx = x1 - x0, dy = y1 - y0, len2 = dx * dx + dy * dy, hw = width / 2.0f;
+    int lo_x = (int)std::floor(std::min(x0, x1) - hw - 1);
+    int hi_x = (int)std::ceil (std::max(x0, x1) + hw + 1);
+    int lo_y = (int)std::floor(std::min(y0, y1) - hw - 1);
+    int hi_y = (int)std::ceil (std::max(y0, y1) + hw + 1);
+    for (int y = lo_y; y <= hi_y; y++)
+        for (int x = lo_x; x <= hi_x; x++) {
+            float t = len2 > 0.0f ? std::clamp(((x - x0) * dx + (y - y0) * dy) / len2, 0.0f, 1.0f) : 0.0f;
+            float px = x0 + t * dx, py = y0 + t * dy;
+            float d = std::sqrt((x - px) * (x - px) + (y - py) * (y - py));
+            float cov = std::clamp(hw + 0.5f - d, 0.0f, 1.0f);   /* 1px soft edge */
+            if (cov > 0.0f) set_px(img, x, y, r, g, b, (uint8_t)std::lround((float)a * cov));
+        }
+}
 inline void draw_polygon_fill(Img &img, const std::vector<std::pair<float,float>> &pts,
                               uint8_t r, uint8_t g, uint8_t b, uint8_t a) {
     float ymin = 1e9, ymax = -1e9;

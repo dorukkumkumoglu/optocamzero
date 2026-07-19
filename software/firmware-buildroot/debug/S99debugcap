@@ -1,0 +1,13 @@
+#!/bin/sh
+# TEMPORARY debug aid: re-arm the crash forensics logger on every boot.
+# Currently installed on the dev camera at /etc/init.d/S99debugcap (2026-07-19,
+# hunting the transfer-mode whole-system freeze). Pairs with
+# /data/debug-capture.sh which mirrors /tmp/optocam-boot.log + dmesg + ps/free
+# to /data every 2s so a hard freeze leaves a <=2s-old post-mortem.
+# Remove from the device before building a release image.
+[ "$1" = start ] || exit 0
+(
+  i=0
+  while ! grep -q " /data " /proc/mounts && [ $i -lt 600 ]; do sleep 0.1; i=$((i+1)); done
+  [ -x /data/debug-capture.sh ] && exec /data/debug-capture.sh
+) >/dev/null 2>&1 &
