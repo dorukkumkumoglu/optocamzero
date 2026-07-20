@@ -1,6 +1,6 @@
 # Optocam Zero native app build.
 #
-# Driven by the Buildroot package (package/optocam/optocam.mk), which passes the
+# Driven by the Buildroot package (package/optocamzero/optocamzero.mk), which passes the
 # cross CXX / CXXFLAGS / LDFLAGS via TARGET_CONFIGURE_OPTS and a target
 # pkg-config. Also builds standalone with the host toolchain for quick testing:
 #
