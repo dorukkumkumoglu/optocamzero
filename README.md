@@ -7,18 +7,20 @@ I designed Optocam Zero to have a very compact, carry everywhere and have fun so
 ![exploded view](assets/DSCG1663.jpg)
 
 ## Features
+- **NEW** - GIF recording and playback.
+- **NEW** - Custom filter maker (up to 5) in hotspot interface.
 - Very compact and easy to carry in your pocket.
 - Intuitive and simple camera interface and controls.
 - Uses autofocus camera module.
 - 8 photo filters included.
-- Easy and fast image transfer through custom hotspot interface. Optimized both for mobile and desktop.
+- Easy and fast image transfer through hotspot interface. Optimized both for mobile and desktop.
 - Screen dimming when inactive to preserve battery.
 - USB-C charging. Device can be used while charging.
 - Interchangable battery.
 - Off the shelf/ common components for the electronics.
 - Fully 3D printed case parts (apart from fasteners).
 - 3D printable TPU protective sleeve and lanyard design is available.
-- **NEW** - GIF recording and playback.
+
 
 <br>
 
