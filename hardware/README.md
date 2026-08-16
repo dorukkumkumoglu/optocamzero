@@ -22,6 +22,8 @@ Two color 3D printing is only needed for the front cover logo and the two colore
 
 The optional case is printed with TPU. If you haven't printed with TPU before, check general TPU printing instructions.
 
+**IMPORTANT:** The front spacer part that goes on top of the screen module has 2 versions with different thicknesses. This is because the LCD module on the display HAT may vary in thickness between batches. Test both front spacers and use the one that fits flush to the display HAT.
+
 <br>
 
 ## Before You Start
