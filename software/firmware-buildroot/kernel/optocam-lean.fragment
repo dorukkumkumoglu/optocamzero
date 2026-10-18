@@ -2,6 +2,8 @@
 # dwc_otg USB host init costs a fixed 0.93s (1.10-2.03s) for a port the camera
 # never uses; sound/SCSI/iSCSI/NFS just bloat the zImage (slower firmware load)
 # and add initcalls + modules. Camera/mmc/i2c/spi/media stacks untouched.
+# Camera drivers (unicam/imx708/dw9807/isp) must stay =m and be modprobed by
+# S02modules — building them in (=y) breaks unicam's async registration.
 
 # USB host (dwc_otg handshake = 0.93s/boot) + USB ethernet that rides on it
 # CONFIG_USB_DWCOTG is not set

@@ -1,11 +1,14 @@
 #!/bin/sh
 # Camera stack, non-blocking (a wedged modprobe must never stall init).
 # SPI moved to S01splash. The app waits for the imx708 entity itself.
+# dw9807 goes FIRST: unicam only completes (video nodes -> libcamera can see
+# the camera) once the sensor's lens sub-device has bound, so loading the VCM
+# last could leave the camera waiting on the tail of this chain.
 [ "$1" = start ] || exit 0
 (
+  modprobe dw9807-vcm
   modprobe i2c-bcm2835
   modprobe bcm2835-unicam
   modprobe bcm2835-isp
   modprobe imx708
-  modprobe dw9807-vcm
 ) &

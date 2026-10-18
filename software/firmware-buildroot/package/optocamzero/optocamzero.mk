@@ -4,7 +4,7 @@
 #
 ################################################################################
 
-OPTOCAMZERO_VERSION = 1.0
+OPTOCAMZERO_VERSION = 1.2.0
 OPTOCAMZERO_SITE = $(OPTOCAMZERO_PKGDIR)/src
 OPTOCAMZERO_SITE_METHOD = local
 OPTOCAMZERO_LICENSE = MIT

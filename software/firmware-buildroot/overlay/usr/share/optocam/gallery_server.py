@@ -757,6 +757,16 @@ body.theme-light .logo, body.theme-yellow .logo { filter: brightness(0); }
 }
 .ctrl-group button + button { border-left: 1px solid var(--line); }
 .ctrl-group button.active { color: var(--text-hi); background: var(--raised); }
+/* Small phones: the type and order groups need ~366px side by side, which a
+   393px-wide iPhone (365px inside the body padding) just misses, so the order
+   group wrapped to its own row. Tighten only as much as each width needs —
+   the space-between still spreads them edge to edge. */
+@media (max-width: 400px) {
+    .controls { gap: 12px; }
+}
+@media (max-width: 383px) {
+    #filter-group button, #order-group button { padding-left: 9px; padding-right: 9px; }
+}
 
 /* ── Viewer ── */
 #viewer {
