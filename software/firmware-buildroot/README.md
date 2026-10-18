@@ -8,8 +8,10 @@ Python version is kept in [`../python-legacy/`](../python-legacy/).
 - `defconfig/` - Buildroot defconfig for the current firmware image.
 - `src/` - native app sources plus its `Makefile`.
 - `package/optocamzero/` - Buildroot package that cross-compiles and installs
-  the native app (`optocam_app` and the `optocam_preview` fallback) to
-  `/usr/bin`.
+  the native app (`optocam_app`, the `optocam_preview` fallback, the
+  `optocam_splash` boot splash and the `st7789_test` panel test) to `/usr/bin`.
+- `package/libcamera/` - replaces Buildroot's libcamera package with the
+  Raspberry Pi fork (`v0.2.0+rpt20240418`); upstream gives photos a blue cast.
 - `config/` - Raspberry Pi boot, genimage, BusyBox, and board scripts.
 - `kernel/` - kernel config fragments.
 - `overlay/` - root filesystem overlay.
@@ -17,13 +19,20 @@ Python version is kept in [`../python-legacy/`](../python-legacy/).
 
 ## Build
 
-These files drop into a Buildroot checkout. The defconfig references in-tree
-paths, so copy each file to the location below:
+These files drop into a **Buildroot 2024.02.9** checkout (other versions are
+untested; the libcamera hash is tied to this version's download format):
+
+```sh
+git clone -b 2024.02.9 https://gitlab.com/buildroot.org/buildroot.git
+```
+
+The defconfig references in-tree paths, so copy each file to the location below:
 
 | This repo | Buildroot checkout |
 | --- | --- |
 | `defconfig/optocam_zero_buildroot_defconfig` | `configs/` |
 | `package/optocamzero/` | `package/optocamzero/` |
+| `package/libcamera/` | `package/libcamera/` (overwrite `libcamera.mk` and `libcamera.hash`) |
 | `src/` (incl. `Makefile`) | `package/optocamzero/src/` |
 | `overlay/` | `board/raspberrypi/overlay/` |
 | `kernel/*.fragment` | `board/raspberrypi/` |

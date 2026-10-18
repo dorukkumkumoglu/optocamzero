@@ -3,6 +3,11 @@
 set -u
 set -e
 
+# Optocam: mount points for the FAT boot partition (WiFi settings, read by
+# S90wifi) and the photo partition. The rootfs is read-only, so they must exist
+# in the image; empty overlay directories don't survive git, so create them here.
+mkdir -p ${TARGET_DIR}/boot ${TARGET_DIR}/data
+
 # Add a console on tty1
 if [ -e ${TARGET_DIR}/etc/inittab ]; then
     grep -qE '^tty1::' ${TARGET_DIR}/etc/inittab || \

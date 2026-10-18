@@ -8,8 +8,9 @@ config BR2_PACKAGE_OPTOCAMZERO
 	help
 	  Optocam Zero native firmware app: libcamera capture, ST7789
 	  preview, HUD, still/GIF capture, and gallery. Installs the main
-	  optocam_app plus the minimal optocam_preview fallback launched
-	  by the S03display init script.
+	  optocam_app, the minimal optocam_preview fallback launched by
+	  the S03display init script, the optocam_splash boot splash run
+	  by S01splash, and the st7789_test panel bring-up utility.
 
 	  https://github.com/dorukkumkumoglu/optocamzero
 
